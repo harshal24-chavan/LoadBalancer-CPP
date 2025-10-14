@@ -1,0 +1,91 @@
+Here are the key things to keep in mind, organized by architectural pillars.
+
+
+
+***
+
+###  Pillar 1: The Core Engine - Flexibility and Performance
+
+This is the heart of your application. Since you've chosen Crow, you're already on a great path because it's built on the high-performance Boost.Asio.
+
+1.  **Embrace Asynchronicity:** Your load balancer will spend almost all its time waiting for network I/O. Don't handle requests synchronously. The entire request-forwarding pipeline should be asynchronous:
+    * **Client Read:** Asynchronously read the incoming request from the client.
+    * **Backend Connect:** Asynchronously open a connection to the chosen backend server.
+    * **Backend Write:** Asynchronously write the client's request to the backend.
+    * **Backend Read:** Asynchronously read the response from the backend.
+    * **Client Write:** Asynchronously write the backend's response back to the client.
+    This is the only way to handle thousands of concurrent connections without dedicating a thread to each one.
+
+2.  **Operate at Layer 7 (HTTP):** A "plug-and-play" system needs to be smart. Don't just forward TCP packets (Layer 4). Parse the HTTP request fully. This allows you to implement intelligent features based on:
+    * URL Path (`/api/v1` vs. `/images`)
+    * HTTP Headers (e.g., `Authorization`, `User-Agent`)
+    * Cookies (for sticky sessions)
+
+3.  **Separate Logic from I/O:** Your core balancing logic (choosing a server) should be completely separate from your networking code. Your Crow route handler should receive a request, call a `LoadBalancer` class to get a backend endpoint, and then use a separate `ProxyService` to handle the data transfer. This makes the code much easier to test and maintain.
+
+***
+
+###  Pillar 2: Configuration - The "Plug" in Plug-and-Play
+
+This is the most critical pillar for making your load balancer easy to use. **Hardcoding anything is forbidden.**
+
+1.  **Use an External, Human-Readable Config File:** The user should never have to touch C++ code to change behavior.
+    * **Format:** Choose a standard format like **YAML** or **TOML**. They are far more readable for complex configurations than JSON.
+    * **Content:** The config file should define everything:
+        * Listener ports (e.g., listen on port 80, 443).
+        * The list of backend servers (e.g., `host: "10.0.1.5", port: 3000`).
+        * The load balancing algorithm to use (e.g., `algorithm: "round_robin"`).
+        * Health check parameters.
+        * Session persistence settings.
+
+2.  **Implement Hot-Reloading:** This is a killer feature for a plug-and-play system. The administrator should be able to update the configuration file (e.g., add a new backend server) and have the load balancer apply the changes **without restarting**.
+    * **Mechanism:**
+        * On Linux, use `inotify` to watch the config file for changes.
+        * A simpler, cross-platform method is to periodically check the file's last-modified timestamp.
+        * Another common pattern is to listen for a system signal like `SIGHUP`, which is the traditional way to tell a daemon to reload its configuration.
+
+***
+
+###  Pillar 3: Intelligence - The Balancing Act
+
+Your load balancer needs robust logic for routing and failure handling.
+
+1.  **Multiple Balancing Algorithms:** Implement the classics and make them selectable in the config file.
+    * `round_robin`: Simple, cycles through servers.
+    * `weighted_round_robin`: If some servers are more powerful than others.
+    * `least_connections`: A dynamic algorithm that sends new requests to the server with the fewest active connections. This is often the best-performing choice.
+    * `ip_hash`: Hash the client's IP address to choose a server. This ensures that a given user will always hit the same backend (a form of sticky session).
+
+2.  **Active Health Checks:** Your load balancer **must** know when a backend server is down.
+    * Periodically (e.g., every 5 seconds), send a lightweight request (e.g., an HTTP `HEAD` request to a `/health` endpoint) to each backend server.
+    * If a server fails a health check (timeout or non-200 response) for 'N' consecutive attempts, remove it from the active pool of servers.
+    * Continue to check the dead server. When it comes back online, add it back to the active pool.
+    * This prevents you from sending users to a dead machine.
+
+3.  **Session Persistence ("Sticky Sessions"):** For applications like e-commerce shopping carts, the user must stay on the same server.
+    * **Cookie-Based:** The easiest method. When you first route a user, create a response cookie (e.g., `backend_id=server3`). On subsequent requests from that user, read the cookie and route them directly to `server3` (as long as it's healthy).
+
+***
+
+### Pillar 4: Observability and Management
+
+If you can't see what it's doing, you can't trust it.
+
+1.  **Structured Logging:** Don't just `std::cout`. Use a proper logging library (like `spdlog`) and log in a structured format (like JSON). This makes logs machine-parsable and easy to search. Log key events:
+    * Server startup and shutdown.
+    * Configuration reloads (and whether they succeeded or failed).
+    * Backend server status changes (marking a server as UP or DOWN).
+    * Critical errors (e.g., failure to connect to any backends).
+
+2.  **Expose Key Metrics:** Your load balancer should serve its own statistics. Create a special endpoint (e.g., `/metrics`) that returns a JSON object with vital information:
+    * Requests per second.
+    * Average response time (latency).
+    * Number of active connections.
+    * Status of each backend server (UP/DOWN, active connections).
+    * HTTP response code counts (how many 200s, 404s, 503s, etc.).
+
+3.  **A Management API (The Ultimate Goal):** For true dynamic control, implement a simple REST API on a separate port. This API would allow an administrator to programmatically change the configuration without even touching a file.
+    * `GET /backends`: List all backend servers and their status.
+    * `POST /backends`: Add a new backend server.
+    * `DELETE /backends/:id`: Remove a backend server.
+    * `PUT /config`: Update the balancing algorithm.
