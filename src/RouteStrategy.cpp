@@ -39,6 +39,16 @@ Server& LeastConnection::selectServer(const std::vector<std::unique_ptr<Server>>
             selectedServer = server.get();
         }
     }
+    selectedServer->incrementActiveConnection();
     return *selectedServer;
 }
 
+std::unique_ptr<IRouteStrategy>  StrategyFactory::getStrategy(const std::string& strategy){
+    if(strategy == "RoundRobin"){
+        return std::make_unique<RoundRobin>();
+    }else if(strategy == "LeastConnection"){
+        return std::make_unique<LeastConnection>();
+    }else{
+        throw std::invalid_argument("Unknown Strategy: " + strategy); 
+    }
+}

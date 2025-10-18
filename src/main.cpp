@@ -10,6 +10,7 @@
 
 #include "RouteStrategy.h"
 #include "Server.h"
+#include "tomlParser.h"
 
 
 
@@ -63,6 +64,8 @@ public:
 
 
 int main(){
+    AppConfig config = parseTomlFile("config.toml");
+
     crow::SimpleApp app;
 
     LoadBalancer& lb = LoadBalancer::getInstance();
@@ -70,7 +73,9 @@ int main(){
     lb.addServer("www.facebook.com");
     lb.addServer("www.x.com");
     lb.listServers();
-    lb.setStrategy(std::make_unique<RoundRobin>());
+
+    lb.setStrategy(StrategyFactory::getStrategy(config.strategy));
+
 
 
 // 3. 🌐 Define the main endpoint
@@ -106,6 +111,5 @@ int main(){
     });
 
     // 4. ▶️ Start the server
-    const int port = 18080;
-    std::cout << "🔥 Load Balancer server starting on port " << port << std::endl;
-    app.port(port).multithreaded().run();}
+    std::cout << "🔥 Load Balancer server starting on port " << config.port << std::endl;
+    app.port(config.port).multithreaded().run();}

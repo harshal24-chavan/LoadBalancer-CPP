@@ -48,3 +48,7 @@ public:
 };
 
 
+class StrategyFactory{
+public:
+    static std::unique_ptr<IRouteStrategy> getStrategy(const std::string& strategy);
+};

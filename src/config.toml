@@ -1,0 +1,13 @@
+[LoadBalancer]
+host = "0.0.0.0"
+strategy = "LeastConnection"
+port = 18080
+
+[[Servers]]
+url="www.google.com"
+
+[[Servers]]
+url="www.facebook.com"
+
+[[Servers]]
+url="www.x.com"
