@@ -23,5 +23,6 @@ public:
     void listServers();
     void setStrategy(std::unique_ptr<IRouteStrategy> strategy);
     Server &getServer();
+    size_t getHealthyCount() const;
 };
 

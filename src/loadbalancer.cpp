@@ -42,4 +42,11 @@ Server &LoadBalancer::getServer() {
     return selectedServer;
 }
 
+size_t LoadBalancer::getHealthyCount() const {
+    size_t count = 0;
+    for(auto& server: serverList){
+        count += server->checkHealth() == true;
+    }
+    return count;
+}
 

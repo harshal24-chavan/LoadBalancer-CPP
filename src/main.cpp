@@ -14,6 +14,7 @@
 
 #include "loadbalancer.h"
 #include "RouteStrategy.h"
+#include "RequestForwarder.h"
 #include "Server.h"
 #include "tomlParser.h"
 
@@ -30,6 +31,33 @@ int main() {
     lb.listServers();
 
     lb.setStrategy(StrategyFactory::getStrategy(config.strategy));
+
+    RequestForwarder forwarder(lb);
+
+    CROW_ROUTE(app, "/health")
+        ([&lb]() {
+            size_t healthy = lb.getHealthyCount();
+            if(healthy > 0){
+                crow::json::wvalue  response;
+                response["status"] = "healthy";
+                response["healthy_servers"] = healthy;
+                return crow::response(200, response);
+            }else{
+                crow::json::wvalue response;
+                response["status"] = "unhealthy";
+                response["healthy_servers"] = healthy;
+                return crow::response(503, response);
+            }
+        });
+    CROW_ROUTE(app, "/api")
+        ([&forwarder](const crow::request& req) {
+            return forwarder.forward(req);
+        });
+
+    CROW_CATCHALL_ROUTE(app)
+        ([&forwarder](const crow::request& req) {
+            return forwarder.forward(req);
+        });
 
 
     // 4. ▶️ Start the server

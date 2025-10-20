@@ -4,7 +4,7 @@ strategy = "LeastConnection"
 port = 18080
 
 [[Servers]]
-url="www.google.com"
+url="https://dogapi.dog/api/v2/breeds"
 
 [[Servers]]
 url="www.facebook.com"
