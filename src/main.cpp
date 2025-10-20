@@ -33,7 +33,10 @@ int main() {
     lb.setStrategy(StrategyFactory::getStrategy(config.strategy));
 
     RequestForwarder forwarder(lb);
-
+    CROW_ROUTE(app, "/home")
+        ([&forwarder](const crow::request& req) {
+            return crow::response(200, "Load Balancer");
+        });
     CROW_ROUTE(app, "/health")
         ([&lb]() {
             size_t healthy = lb.getHealthyCount();

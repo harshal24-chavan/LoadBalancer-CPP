@@ -12,5 +12,5 @@ private:
     crow::response convertResponse(const cpr::Response& cprRes);
 public:
     RequestForwarder(LoadBalancer& loadbalancer);
-    crow::response forward(const crow::request& req, int maxRetries = 3);
+    crow::response forward(const crow::request& req, int maxRetries = 1);
 };

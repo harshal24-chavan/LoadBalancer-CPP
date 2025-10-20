@@ -7,7 +7,7 @@ port = 18080
 url="https://dogapi.dog/api/v2/breeds"
 
 [[Servers]]
-url="www.facebook.com"
+url="https://api.attackontitanapi.com/episodes"
 
 [[Servers]]
-url="www.x.com"
+url="https://api.attackontitanapi.com/characters"

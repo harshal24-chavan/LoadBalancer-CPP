@@ -10,12 +10,14 @@
 
 cpr::Header RequestForwarder::convertHeaders(const crow::request& req){
     cpr::Header headers;
+    std::cout<<"\nRequest Headers: "<<std::endl;
     for(const auto& header: req.headers){
         if(header.first != "Connection" && 
             header.first != "Keep-Alive" &&
             header.first != "Transfer-Encoding" &&
             header.first != "Host"){
             headers[header.first] = header.second;
+            std::cout<<header.first<<": "<<header.second<<std::endl;
         }
     }
 
@@ -28,7 +30,9 @@ cpr::Header RequestForwarder::convertHeaders(const crow::request& req){
 }
 
 crow::response RequestForwarder::convertResponse(const cpr::Response& cprRes){
+    std::cout<<"CPR Response body: "<<cprRes.text<<std::endl;
     crow::response response(cprRes.status_code, cprRes.text);
+    std::cout<<"Crow Response Body: "<<response.body<<std::endl;
 
     // copy response headers
     for(const auto& header: cprRes.header){
@@ -44,7 +48,9 @@ crow::response RequestForwarder::forward(const crow::request& req, int maxRetrie
     while(retries < maxRetries){
         Server& backend = lb.getServer();
         try{
-            std::string fullUrl = backend.getUrl() + std::string(req.url);
+            // std::string fullUrl = backend.getUrl() + std::string(req.url);
+            std::string fullUrl = backend.getUrl() ;
+            std::cout<<"Forwarding request to: "<<fullUrl<<std::endl;
 
             cpr::Header headers = convertHeaders(req);
 
@@ -55,6 +61,7 @@ crow::response RequestForwarder::forward(const crow::request& req, int maxRetrie
 
             switch(req.method){
                 case crow::HTTPMethod::Get:
+                    std::cout<<"Get Request"<<std::endl;
                     cprRes = cpr::Get(
                         cpr::Url(fullUrl),
                         headers,
@@ -63,6 +70,7 @@ crow::response RequestForwarder::forward(const crow::request& req, int maxRetrie
                     );
                     break;
                 case crow::HTTPMethod::Post:
+                    std::cout<<"Post Request"<<std::endl;
                     cprRes = cpr::Post(
                         cpr::Url(fullUrl),
                         headers,
@@ -88,7 +96,6 @@ crow::response RequestForwarder::forward(const crow::request& req, int maxRetrie
                         connectTimeout
                     );
                     break;
-
                 case crow::HTTPMethod::Patch:
                     cprRes = cpr::Patch(
                         cpr::Url{fullUrl},
@@ -98,7 +105,6 @@ crow::response RequestForwarder::forward(const crow::request& req, int maxRetrie
                         connectTimeout
                     );
                     break;
-
                 case crow::HTTPMethod::Head:
                     cprRes = cpr::Head(
                         cpr::Url{fullUrl},
@@ -122,7 +128,7 @@ crow::response RequestForwarder::forward(const crow::request& req, int maxRetrie
             }
 
             // Check if request was successful
-            if (cprRes.error.code == cpr::ErrorCode::OK) {
+            if (cprRes.error.message.empty()) {
                 backend.markHealthy();
                 CROW_LOG_DEBUG << "Forwarded " << crow::method_name(req.method) 
                     << " " << req.url << " to " << backend.getUrl()
