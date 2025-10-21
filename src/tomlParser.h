@@ -11,10 +11,11 @@
  * Provides default values in case parsing fails or keys are missing.
  */
 struct AppConfig {
-    std::string host = "0.0.0.0"; // Default host
-    std::string strategy = "RoundRobin"; // Default strategy
-    int port = 18080;             // Default port
-    std::vector<std::string> serverList;
+  std::string host = "0.0.0.0"; // Default host
+  std::string strategy = "RoundRobin"; // Default strategy
+  int port = 18080;             // Default port
+  std::vector<std::string> serverList;
+  int healthCheckInterval = 5;
 };
 
 /**

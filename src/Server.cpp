@@ -7,29 +7,29 @@ Server::Server(std::string u) : url(u){
 }
 
 const std::string Server::getUrl() const{
-    return url;
+  return url;
 }
 
 bool Server::checkHealth() const{
-    // for now just return 1; // ok health
-    return healthy.load();
+  // for now just return 1; // ok health
+  return healthy.load();
 }
 
 void Server::markUnhealthy(){
-    healthy = false;
+  healthy = false;
 }
 void Server::markHealthy(){
-    healthy = true;
+  healthy = true;
 }
 
 void Server::incrementActiveConnection(){
-    activeConnections++;
+  activeConnections++;
 }
 void Server::decrementActiveConnection(){
-    activeConnections--;
+  activeConnections--;
 }
 int Server::getConnections() const {
-    return activeConnections.load();
+  return activeConnections.load();
 }
 
 

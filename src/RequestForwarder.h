@@ -7,10 +7,10 @@
 
 class RequestForwarder{
 private:
-    LoadBalancer& lb;
-    cpr::Header convertHeaders(const crow::request& req);
-    crow::response convertResponse(const cpr::Response& cprRes);
+  LoadBalancer& lb;
+  cpr::Header convertHeaders(const crow::request& req);
+  crow::response convertResponse(const cpr::Response& cprRes);
 public:
-    RequestForwarder(LoadBalancer& loadbalancer);
-    crow::response forward(const crow::request& req, int maxRetries = 1);
+  RequestForwarder(LoadBalancer& loadbalancer);
+  crow::response forward(const crow::request& req, int maxRetries = 1);
 };
