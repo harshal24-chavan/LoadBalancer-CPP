@@ -13,8 +13,7 @@ public:
   const std::string getUrl() const;
 
   bool checkHealth() const ;
-  void markUnhealthy();
-  void markHealthy();
+  void setHealth(bool status);
 
   void incrementActiveConnection();
   void decrementActiveConnection();

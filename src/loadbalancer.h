@@ -4,11 +4,13 @@
 #include "Server.h"
 #include<vector>
 #include<string>
+#include<mutex>
 
 
 class LoadBalancer {
 private:
   std::vector<std::unique_ptr<Server>> serverList;
+  std::mutex serverListMutex;
   std::unique_ptr<IRouteStrategy> routeStrategy;
 
   LoadBalancer() = default;
@@ -21,9 +23,11 @@ public:
   void addServer(std::string url);
   void removeServer(std::string url);
   void listServers();
-  std::vector<std::unique_ptr<Server>> getServerList();
   void setStrategy(std::unique_ptr<IRouteStrategy> strategy);
   Server &getServer();
   size_t getHealthyCount() const;
+
+  //visitor pattern accept function
+  void accept(std::function<void(Server&)> visitorFunc);
 };
 

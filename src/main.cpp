@@ -17,6 +17,7 @@
 #include "RequestForwarder.h"
 #include "Server.h"
 #include "tomlParser.h"
+#include "healthChecker.h"
 
 int main() {
   AppConfig config = parseTomlFile("config.toml");
@@ -31,8 +32,13 @@ int main() {
   lb.listServers();
 
   lb.setStrategy(StrategyFactory::getStrategy(config.strategy));
-
   RequestForwarder forwarder(lb);
+
+  HealthChecker healthChecker(lb);
+  healthChecker.startMonitoring();
+
+
+
   CROW_ROUTE(app, "/home")
     ([&forwarder](const crow::request& req) {
       return crow::response(200, "Load Balancer");

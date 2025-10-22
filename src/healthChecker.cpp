@@ -1,51 +1,41 @@
-#include<thread>
-#include<vector>
-#include<string>
-#include<chrono>
-#include<cpr/cpr.h>
+#include <chrono>
+#include <cpr/cpr.h>
+#include <iostream>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "loadbalancer.h"
+#include "healthChecker.h"
 
-class HealthChecker{
-private:
-  LoadBalancer& loadbalancer;
+void HealthChecker::monitoringLoop() {
+    while (true) {
+      std::cout << "[HealthCheck] Running health checks..." << std::endl;
 
-  void checkServerHealth(std::vector<Server>& serverList){
-    int ind = 0;
-    int retryCount = 0;
-    while(true){
-      for(auto& server : serverList){
-        try{
-          Server& server = serverList[ind];
-          ind = (ind + 1) % serverList.size();
+      loadbalancer.accept([](Server& server){
 
-          std::string fullUrl = server.getUrl() + "/health";
+        auto timeout = cpr::Timeout{5000}; // 30 second timeout
+        cpr::Response res = cpr::Head(cpr::Url{server.getUrl() + "/health"}, timeout);
 
-          cpr::Timeout timeout = cpr::Timeout{3000};// get from appconfig
-          cpr::Response cprRes = cpr::Get(cpr::Url{fullUrl}, timeout, cpr::ConnectTimeout{30000});
-
-          if(cprRes.status_code == 200){
-            server.markHealthy();
-          }
-        }catch(const std::exception& e){
-          retryCount++;
-          if(retryCount > 3){
-            server.markUnhealthy();
-          }
+        bool current_status = false;
+        if(res.status_code >= 200 && res.status_code < 400){
+          current_status = true;
         }
-      }
-      // after checking all servers, sleep
-      std::this_thread::sleep_for(std::chrono::seconds(5));
+        if(server.checkHealth() != current_status){
+          std::cout << "  [HealthCheck] Server " << server.getUrl() 
+            << " changed state to " 
+            << (current_status ? "Healthy" : "Unhealthy") << std::endl;
+        }
+        server.setHealth(current_status);
+      });
+
+      std::this_thread::sleep_for(std::chrono::seconds(10));
     }
-  }
-public:
-  HealthChecker(LoadBalancer& lb) : loadbalancer(lb){}
+}
 
-  void startMonitoring(){
+HealthChecker::HealthChecker(LoadBalancer &lb) : loadbalancer(lb) {}
 
-    std::vector<std::unique_ptr<Server>> serverList = loadbalancer.getServerList();
-    std::thread monitorThread(&checkServerHealth, serverList);
+void HealthChecker::startMonitoring() {
 
-    monitorThread.join();
-  }
-};
+  std::thread([this]() { this->monitoringLoop(); }).detach();
+}

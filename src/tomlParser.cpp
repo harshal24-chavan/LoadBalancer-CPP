@@ -17,6 +17,7 @@ AppConfig parseTomlFile(const std::string& filename) {
     config.host = tbl["LoadBalancer"]["host"].value_or("0.0.0.0");
     config.port = tbl["LoadBalancer"]["port"].value_or(18080);
     config.strategy = tbl["LoadBalancer"]["strategy"].value_or("RoundRobin");
+    config.healthCheckInterval = tbl["HealthChecker"]["interval"].value_or(10);
 
     // --- Safely parse the 'array of tables' for Servers ---
     // Note the capital 'S' in "Servers"

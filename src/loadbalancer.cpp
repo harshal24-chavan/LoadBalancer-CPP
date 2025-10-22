@@ -1,11 +1,14 @@
+#include<iostream>
+#include<functional>
+#include<vector>
+#include<string>
+#include<memory>
+#include<mutex>
+
 #include "loadbalancer.h"
 #include "RouteStrategy.h"
 #include "Server.h"
 
-#include<iostream>
-#include<vector>
-#include<string>
-#include<memory>
 
 
 LoadBalancer &LoadBalancer::getInstance() {
@@ -13,10 +16,12 @@ LoadBalancer &LoadBalancer::getInstance() {
   return lb;
 }
 void LoadBalancer::addServer(std::string url) {
+  std::lock_guard<std::mutex> lock(serverListMutex);
   serverList.push_back(std::make_unique<Server>(url));
 }
 
 void LoadBalancer::removeServer(std::string url) {
+  std::lock_guard<std::mutex> lock(serverListMutex);
   std::erase_if(serverList, [&](const std::unique_ptr<Server> &server) {
     return server->getUrl() == url;
   });
@@ -31,9 +36,6 @@ void LoadBalancer::listServers() {
   std::cout << "------------------------------------------" << std::endl;
 }
 
-std::vector<std::unique_ptr<Server>> LoadBalancer::getServerList() {
-  return serverList;
-}
 
 void LoadBalancer::setStrategy(std::unique_ptr<IRouteStrategy> strategy) {
   routeStrategy = std::move(strategy);
@@ -54,3 +56,9 @@ size_t LoadBalancer::getHealthyCount() const {
   return count;
 }
 
+void LoadBalancer::accept(std::function<void(Server&)> visitorFunc){
+  std::lock_guard<std::mutex> lock(serverListMutex);
+  for(const auto& server: serverList){
+    visitorFunc(*server);
+  }
+}

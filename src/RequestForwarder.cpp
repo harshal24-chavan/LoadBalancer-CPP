@@ -127,14 +127,14 @@ crow::response RequestForwarder::forward(const crow::request& req, int maxRetrie
 
       // Check if request was successful
       if (cprRes.error.message.empty()) {
-        backend.markHealthy();
+        backend.setHealth(true);
         CROW_LOG_DEBUG << "Forwarded " << crow::method_name(req.method) 
           << " " << req.url << " to " << backend.getUrl()
           << " - Status: " << cprRes.status_code;
         return convertResponse(cprRes);
       } else {
         // Connection/network error
-        backend.markUnhealthy();
+        backend.setHealth(false);
         CROW_LOG_ERROR << "Backend error (" << backend.getUrl() << "): " 
           << cprRes.error.message;
         retries++;
@@ -142,7 +142,7 @@ crow::response RequestForwarder::forward(const crow::request& req, int maxRetrie
       }
     }
     catch (const std::exception& e) {
-      backend.markUnhealthy();
+      backend.setHealth(false);
       CROW_LOG_ERROR << "Exception forwarding to " << backend.getUrl()
         << ": " << e.what();
       retries++;

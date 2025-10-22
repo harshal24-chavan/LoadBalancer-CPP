@@ -11,3 +11,6 @@ url="https://api.attackontitanapi.com/episodes"
 
 [[Servers]]
 url="https://api.attackontitanapi.com/characters"
+
+[HealthChecker]
+interval = 10

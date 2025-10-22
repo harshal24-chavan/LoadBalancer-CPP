@@ -11,15 +11,11 @@ const std::string Server::getUrl() const{
 }
 
 bool Server::checkHealth() const{
-  // for now just return 1; // ok health
   return healthy.load();
 }
 
-void Server::markUnhealthy(){
-  healthy = false;
-}
-void Server::markHealthy(){
-  healthy = true;
+void Server::setHealth(bool status){
+  healthy.store(status);
 }
 
 void Server::incrementActiveConnection(){

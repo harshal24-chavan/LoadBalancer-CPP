@@ -15,7 +15,7 @@ struct AppConfig {
   std::string strategy = "RoundRobin"; // Default strategy
   int port = 18080;             // Default port
   std::vector<std::string> serverList;
-  int healthCheckInterval = 5;
+  int healthCheckInterval = 10;
 };
 
 /**
