@@ -13,4 +13,4 @@ url="https://api.attackontitanapi.com/episodes"
 url="https://api.attackontitanapi.com/characters"
 
 [HealthChecker]
-interval = 10
+interval = 3
