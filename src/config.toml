@@ -1,5 +1,6 @@
 [LoadBalancer]
 host = "0.0.0.0"
+# strategy = "RoundRobin"
 strategy = "LeastConnection"
 port = 18080
 
@@ -13,4 +14,4 @@ url="https://api.attackontitanapi.com/episodes"
 url="https://api.attackontitanapi.com/characters"
 
 [HealthChecker]
-interval = 3
+interval = 5

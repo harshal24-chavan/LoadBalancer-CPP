@@ -3,6 +3,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "RouteStrategy.h"
@@ -16,27 +17,12 @@ LoadBalancer &LoadBalancer::getInstance() {
 }
 void LoadBalancer::addServer(std::string url) {
   std::lock_guard<std::mutex> lock(serverListMutex);
-  serverList.push_back(std::make_unique<Server>(url));
-  activeServerList.push_back(std::make_unique<Server>(url));
+  serverList.push_back(std::make_shared<Server>(url));
 }
 
 void LoadBalancer::removeServer(std::string url) {
   std::lock_guard<std::mutex> lock(serverListMutex);
-  std::erase_if(serverList, [&](const std::unique_ptr<Server> &server) {
-    return server->getUrl() == url;
-  });
-  std::erase_if(activeServerList, [&](const std::unique_ptr<Server> &server) {
-    return server->getUrl() == url;
-  });
-}
-void LoadBalancer::addActiveServer(std::string url) {
-  std::lock_guard<std::mutex> lock(activeServerListMutex);
-  activeServerList.push_back(std::make_unique<Server>(url));
-}
-
-void LoadBalancer::removeActiveServer(std::string url) {
-  std::lock_guard<std::mutex> lock(activeServerListMutex);
-  std::erase_if(activeServerList, [&](const std::unique_ptr<Server> &server) {
+  std::erase_if(serverList, [&](const std::shared_ptr<Server> &server) {
     return server->getUrl() == url;
   });
 }
@@ -70,7 +56,22 @@ Server &LoadBalancer::getServer() {
   return selectedServer;
 }
 
+std::vector<std::shared_ptr<Server>> LoadBalancer::getAllServers() {
+  std::lock_guard<std::mutex> lock(serverListMutex);
+  return serverList;
+}
+
 int LoadBalancer::getHealthyCount() const { return activeServerList.size(); }
+
+void LoadBalancer::rebuildActiveServer() {
+  std::vector<std::shared_ptr<Server>> newHealthyServerList;
+  for (const auto &server : serverList) {
+    if (server->isHealthy()) {
+      newHealthyServerList.push_back(server);
+    }
+  }
+  activeServerList.swap(newHealthyServerList);
+}
 
 /**
  * this Function is an implementation part of Visitor pattern for healthChecker
@@ -95,21 +96,31 @@ void LoadBalancer::accept(std::function<void(Server &)> visitorFunc) {
  */
 void LoadBalancer::updateConfig(AppConfig config) {
   std::lock_guard<std::mutex> lock(loadBalancerConfigMutex);
-  std::set<std::string> newServerList;
+
+  std::unordered_set<std::string> newServerList;
 
   for (const auto &it : config.serverList) {
     newServerList.insert(it);
   }
 
   for (const auto &server : serverList) {
-    if (!newServerList.count(server.getUrl())) {
-      removeServer(server.getUrl());
+    if (!newServerList.count(server->getUrl())) {
+      removeServer(server->getUrl());
     }
   }
 
   for (const auto &it : newServerList) {
     // adding any new server to the list
-    addServer(it);
+    bool newServer = true;
+    for (const std::shared_ptr<Server> &server : serverList) {
+      if (server->getUrl() == it) {
+        newServer = false;
+        break;
+      }
+    }
+    if (newServer) {
+      addServer(it);
+    }
   }
 
   setStrategy(StrategyFactory::getStrategy(config.strategy));

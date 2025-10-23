@@ -26,16 +26,16 @@ int main() {
   crow::SimpleApp app;
 
   LoadBalancer &lb = LoadBalancer::getInstance();
-  // add servers to load balancer
-  for (std::string &url : config.serverList) {
-    lb.addServer(url);
-  }
+  // // add servers to load balancer
+  // for (std::string &url : config.serverList) {
+  //   lb.addServer(url);
+  // }
+  lb.updateConfig(config);
   lb.listServers();
 
-  lb.setStrategy(StrategyFactory::getStrategy(config.strategy));
   RequestForwarder forwarder(lb);
 
-  HealthChecker healthChecker(lb);
+  HealthChecker healthChecker(lb, config);
   healthChecker.startMonitoring();
 
   HotReloader hotReloader(lb);

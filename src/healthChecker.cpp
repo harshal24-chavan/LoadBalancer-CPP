@@ -7,41 +7,35 @@
 
 #include "healthChecker.h"
 #include "loadbalancer.h"
+#include "tomlParser.h"
 
 void HealthChecker::monitoringLoop() {
   while (true) {
     std::cout << "[HealthCheck] Running health checks..." << std::endl;
 
-    loadbalancer.accept([this](Server &server) {
-      auto timeout = cpr::Timeout{5000}; // 30 second timeout
-      cpr::Response res =
-          cpr::Head(cpr::Url{server.getUrl() + "/health"}, timeout);
+    std::vector<std::shared_ptr<Server>> serverList =
+        loadbalancer.getAllServers();
 
-      bool current_status = false;
-      if (res.status_code >= 200 && res.status_code < 400) {
-        current_status = true;
+    for (const auto &server : serverList) {
+      auto timeout = cpr::Timeout{5000}; // 5 seconds timeout
+      std::string url = server->getUrl();
+      cpr::Response cprRes = cpr::Get(cpr::Url{url}, timeout);
+
+      if (cprRes.status_code >= 200 && cprRes.status_code < 400) {
+        server->setHealthy(true);
+      } else {
+        server->setHealthy(false);
       }
-      if (server.checkHealth() != current_status) {
-        std::cout << "  [HealthCheck] Server " << server.getUrl()
-                  << " changed state to "
-                  << (current_status ? "Healthy" : "Unhealthy") << std::endl;
+    }
+    loadbalancer.rebuildActiveServer();
 
-        // add or remove the server from acitveServerList
-        if (current_status == false) {
-          // unhealthy server
-          loadbalancer.removeActiveServer(server.getUrl());
-        } else {
-          loadbalancer.addActiveServer(server.getUrl());
-        }
-      }
-      server.setHealth(current_status);
-    });
-
-    std::this_thread::sleep_for(std::chrono::seconds(10));
+    std::this_thread::sleep_for(
+        std::chrono::seconds(config.healthCheckInterval));
   }
 }
 
-HealthChecker::HealthChecker(LoadBalancer &lb) : loadbalancer(lb) {}
+HealthChecker::HealthChecker(LoadBalancer &lb, AppConfig conf)
+    : loadbalancer(lb), config(conf) {}
 
 void HealthChecker::startMonitoring() {
 

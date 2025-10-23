@@ -1,11 +1,12 @@
 // routestrategy.h
 
-#pragma once // Important: Prevents the header from being included multiple times
+#pragma once // Important: Prevents the header from being included multiple
+             // times
 
-#include <vector>
 #include <memory>
+#include <mutex>
 #include <string>
-#include<mutex>
+#include <vector>
 
 // Forward declare Server so we don't need to include its full definition here
 class Server;
@@ -14,7 +15,8 @@ class Server;
 class IRouteStrategy {
 public:
   virtual ~IRouteStrategy() = default;
-  virtual Server& selectServer(const std::vector<std::unique_ptr<Server>>& serverList) = 0;
+  virtual Server &
+  selectServer(const std::vector<std::shared_ptr<Server>> &serverList) = 0;
 };
 
 // The concrete strategy declaration
@@ -30,7 +32,8 @@ public:
   RoundRobin() = default;
 
   // The method declaration
-  Server& selectServer(const std::vector<std::unique_ptr<Server>>& serverList) override;
+  Server &
+  selectServer(const std::vector<std::shared_ptr<Server>> &serverList) override;
 };
 
 // You can declare other strategies here as well
@@ -42,13 +45,15 @@ class LeastConnection : public IRouteStrategy {
 public:
   // The constructor declaration
   LeastConnection() = default;
+  mutable std::mutex mtx;
 
   // The method declaration
-  Server& selectServer(const std::vector<std::unique_ptr<Server>>& serverList) override;
+  Server &
+  selectServer(const std::vector<std::shared_ptr<Server>> &serverList) override;
 };
 
-
-class StrategyFactory{
+class StrategyFactory {
 public:
-  static std::unique_ptr<IRouteStrategy> getStrategy(const std::string& strategy);
+  static std::unique_ptr<IRouteStrategy>
+  getStrategy(const std::string &strategy);
 };
