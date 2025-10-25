@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/Concerned-Doggo/WebDev/MicroServices/LoadBalancer-C++/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
