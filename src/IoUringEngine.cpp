@@ -2,9 +2,10 @@
 #include <iostream>
 #include <liburing.h>
 #include <memory>
+#include <string_view>
 #include <sys/socket.h>
 
-#define MAX_BUFFER_SIZE 4096
+#define MAX_BUFFER_SIZE 8192
 #define MAX_CONNECTIONS 10000
 
 enum class EventType {
@@ -14,11 +15,11 @@ enum class EventType {
   WRITING_CLIENT_REQ_TO_BACKEND,
   READING_BACKEND_RESP,
 
-  WRITING_BACKEND_RESP_TO_CLIENT,
+  WRITING_BACKEND_HEADERS_TO_CLIENT,
 
   // zero copy of req/resp body
-  SPLICING_REQ_TO_BACKEND,
-  SPLICING_RESP_TO_CLIENT,
+  SPLICING_REQ_TO_PIPE,    // backend to pipe
+  SPLICING_RESP_TO_CLIENT, // pipe to client
 
   CLOSING_CLIENT_CONNECTION
 };
@@ -47,7 +48,7 @@ struct IoUringEngine::Impl {
   struct io_uring ring;
   int server_fd = -1;
 
-  add_accept(int listen_fd) {
+  void add_accept(int listen_fd) {
     auto *sqe = io_uring_get_sqe(&ring);
     if (!listenerCtx) {
       listenerCtx =
@@ -56,7 +57,40 @@ struct IoUringEngine::Impl {
 
     io_uring_prep_multishot_accept_direct(sqe, listen_fd, nullptr, nullptr, 0);
     sqe->file_index = IORING_FILE_INDEX_ALLOC;
+
     io_uring_sqe_set_data(sqe, listener_ctx.get());
+  }
+
+  void add_read(int client_direct_index, RequestData *req) {
+    auto *sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_recv(sqe, client_direct_index, req->buffer, MAX_BUFFER_SIZE,
+                       0);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, req);
+  }
+
+  void close_client_direct(int fd) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+
+    // Tell the kernel to empty this specific lock-free array slot
+    io_uring_prep_close_direct(sqe, fd);
+
+    // We pass nullptr because we don't need anything to track a closure.
+    // We just fire and forget!
+    io_uring_sqe_set_data(sqe, nullptr);
+  }
+  void terminate_connection(RequestData *req, BackendPool *pool) {
+    // 1. Safely return the backend to the pool (if we had one)
+    if (req->backend_direct_fd != -1 && req->server_id != -1) {
+      pool->return_index(req->server_id, req->backend_direct_fd);
+      req->backend_direct_fd = -1; // Prevent double-returns
+    }
+
+    // 2. Tell io_uring to kill the client socket (Fire and forget!)
+    close_client_direct(req->direct_fd_index);
+
+    // Note: We don't need to manually close the pipes here because
+    // the ~RequestData() destructor will automatically close them for us!
   }
 };
 
@@ -142,7 +176,80 @@ void IoUringEngine::run() {
 
     switch (raw_req->type) {
       case EventType::ACCEPTING{
+
+        if(res < 0){
+          if (!(cqe->flags & IORING_CQE_F_MORE)) {
+            pimpl->add_accept(pimpl->server_fd);
+            io_uring_submit(&pimpl->ring);
+          }
+          break;
+        }
+
+        int client_direct_index = res;
+        auto new_client_req = std::make_unique<RequestData>(
+            EventType::READING_CLIENT_REQ, client_direct_index);
+
+        pimpl->add_read(client_direct_index, new_client_req.get());
+        new_client_req.release();
+
+        if (!(cqe->flags & IORING_CQE_F_MORE)) {
+          pimpl->add_accept(pimpl->server_fd);
+        }
+        io_uring_submit(&pimpl->ring);
+        break;
       }
+      case EventType::READING_CLIENT_REQ{
+        if(res <= 0){
+          pimpl->terminate_connection(req.get(), pool.get());
+          break;
+        }
+
+        req->total_bytes_read += res;
+
+        std::string_view window(req->buffer, req->total_bytes_read);
+
+        size_t boundry = window.find("\r\n\r\n");
+
+        if(bound != std::string_view::npos){
+          // found complete headers now forward the request to backendserver
+          req->server_id = 0;
+          req->backend_direct_fd = pool->checkout(req->server_id);
+
+          if (req->backend_direct_fd == -1) {
+            pimpl->terminate_connection(req.get(), pool.get());
+            break; // FIX: Drop client safely if pool is completely empty
+          }
+
+          req->type = EventType::WRITING_CLIENT_REQ_TO_BACKEND;
+          pimpl->forward_to_backend(req.get());
+          
+          req.release();
+          io_uring_submit(&pimpl->ring);
+        } else{
+          // header not finished read next chunk
+          auto *sqe = io_uring_get_sqe(&ring);
+          io_uring_prep_recv(sqe, req->direct_fd_index, 
+              req->buffer + req->total_bytes_read, // Pointer math!
+              MAX_BUFFER_SIZE - req->total_bytes_read, 
+              0);
+          io_uring_sqe_set_data(sqe, req.release());
+        }
+
+        break;
+      }
+      case EventType::WRITING_CLIENT_REQ_TO_BACKEND{
+        if(res < 0){
+          pimpl->terminate_connection(req.get(), pool.get());
+          break;
+        }
+        
+        req->type = EventType::READING_BACKEND_RESP;
+        pimpl->add_read(req->backend_direct_fd, req.get());
+        io_uring_submit(&pimpl->ring);
+        req.release();
+        break;
+      }
+      case EventType::
     }
   }
 }
