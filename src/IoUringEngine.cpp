@@ -1,13 +1,19 @@
 #include "IoUringEngine.hpp"
+#include "BackendPool.hpp"
+
+#include <charconv> // For std::from_chars
+#include <cstring>  // For memset/memcpy
 #include <iostream>
-#include <liburing.h>
 #include <memory>
 #include <string_view>
-#include <sys/socket.h>
+#include <vector>
 
-// for the pipes,  for zero copy data forwarding
-#include <fcntl.h>  // Required for O_NONBLOCK and O_CLOEXEC
-#include <unistd.h> // Required for pipe2 and close
+#include <arpa/inet.h>
+#include <fcntl.h> // For O_NONBLOCK and O_CLOEXEC
+#include <liburing.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h> // For pipe2 and close
 
 #define MAX_BUFFER_SIZE 8192
 #define MAX_CONNECTIONS 10000
@@ -15,15 +21,13 @@
 enum class EventType {
   ACCEPTING,
   READING_CLIENT_REQ,
-
   WRITING_CLIENT_REQ_TO_BACKEND,
   READING_BACKEND_RESP,
-
   WRITING_BACKEND_HEADERS_TO_CLIENT,
 
-  // zero copy of req/resp body
-  SPLICING_REQ_TO_PIPE,    // backend to pipe
-  SPLICING_RESP_TO_CLIENT, // pipe to client
+  // Zero-Copy states
+  SPLICING_REQ_TO_PIPE,    // Backend -> Pipe
+  SPLICING_RESP_TO_CLIENT, // Pipe -> Client
 
   CLOSING_CLIENT_CONNECTION
 };
@@ -31,64 +35,54 @@ enum class EventType {
 struct RequestData {
   EventType type;
 
-  int client_fd_index; // index of the array in which
-                       // we have registered the files clients connection
+  // Standardized FD names
+  int direct_fd_index;        // The Client's registered FD
+  int backend_direct_fd = -1; // The Backend's registered FD
+  int server_id = -1;
 
-  int backend_fd_index = -1; // backend direct_fd index
-  int server_id = -1;        // which server to route the request to?
+  int pipe_fds[2] = {-1, -1}; // The Zero-Copy Pipe
 
-  int pipe_fds[2] = {-1, -1};
-
-  char *buffer[MAX_BUFFER_SIZE];
+  char buffer[MAX_BUFFER_SIZE];
   size_t total_bytes_read = 0;
   size_t body_bytes_forwarded = 0;
   bool backend_header_parsed = false;
   size_t expected_content_length = 0;
 
-  sockaddr_in client_addr{};
-  socklen_t client_addr_len = sizeof(client_addr);
-
-  RequestData(EventType t, int fd) : type(t), client_fd_index(fd) {
+  RequestData(EventType t, int fd) : type(t), direct_fd_index(fd) {
     if (pipe2(pipe_fds, O_NONBLOCK | O_CLOEXEC) < 0) {
       std::cerr << "CRITICAL: Failed to allocate kernel pipe!\n";
     }
   }
 
   ~RequestData() {
-    // Return the file descriptors to the Linux Kernel
-    if (pipe_fds[0] != -1) {
+    if (pipe_fds[0] != -1)
       close(pipe_fds[0]);
-    }
-    if (pipe_fds[1] != -1) {
+    if (pipe_fds[1] != -1)
       close(pipe_fds[1]);
-    }
   }
 };
 
 struct IoUringEngine::Impl {
   std::vector<int> direct_descriptors;
-
-  std::unique_ptr<RequestData> listenerCtx;
+  std::unique_ptr<RequestData> listener_ctx;
   struct io_uring ring;
   int server_fd = -1;
 
   void add_accept(int listen_fd) {
     auto *sqe = io_uring_get_sqe(&ring);
-    if (!listenerCtx) {
-      listenerCtx =
+    if (!listener_ctx) {
+      listener_ctx =
           std::make_unique<RequestData>(EventType::ACCEPTING, listen_fd);
     }
 
     io_uring_prep_multishot_accept_direct(sqe, listen_fd, nullptr, nullptr, 0);
     sqe->file_index = IORING_FILE_INDEX_ALLOC;
-
     io_uring_sqe_set_data(sqe, listener_ctx.get());
   }
 
-  void add_read(int client_direct_index, RequestData *req) {
+  void add_read(int fd, RequestData *req) {
     auto *sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_recv(sqe, client_direct_index, req->buffer, MAX_BUFFER_SIZE,
-                       0);
+    io_uring_prep_recv(sqe, fd, req->buffer, MAX_BUFFER_SIZE, 0);
     sqe->flags |= IOSQE_FIXED_FILE;
     io_uring_sqe_set_data(sqe, req);
   }
@@ -101,18 +95,25 @@ struct IoUringEngine::Impl {
     io_uring_sqe_set_data(sqe, req);
   }
 
-  void add_splice(int from_fd, int to_fd, unsigned int bytes_to_forward,
-                  RequestData *req, bool in_is_fixed, bool out_if_fixed) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+  void add_write(int fd, const char *buf, size_t len, EventType next_event,
+                 RequestData *req) {
+    auto *sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_send(sqe, fd, buf, len, 0);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    req->type = next_event;
+    io_uring_sqe_set_data(sqe, req);
+  }
 
+  void add_splice(int fd_in, int fd_out, size_t len, RequestData *req,
+                  bool in_is_fixed, bool out_is_fixed) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
     unsigned int splice_flags = SPLICE_F_MOVE | SPLICE_F_MORE;
 
     if (in_is_fixed) {
       splice_flags |= SPLICE_F_FD_IN_FIXED;
     }
 
-    io_uring_prep_splice(sqe, from_fd, -1, to_fd, -1, bytes_to_forward,
-                         splice_flags);
+    io_uring_prep_splice(sqe, fd_in, -1, fd_out, -1, len, splice_flags);
 
     if (out_is_fixed) {
       sqe->flags |= IOSQE_FIXED_FILE;
@@ -123,26 +124,16 @@ struct IoUringEngine::Impl {
 
   void close_client_direct(int fd) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-
-    // Tell the kernel to empty this specific lock-free array slot
     io_uring_prep_close_direct(sqe, fd);
-
-    // We pass nullptr because we don't need anything to track a closure.
-    // We just fire and forget!
     io_uring_sqe_set_data(sqe, nullptr);
   }
+
   void terminate_connection(RequestData *req, BackendPool *pool) {
-    // 1. Safely return the backend to the pool (if we had one)
     if (req->backend_direct_fd != -1 && req->server_id != -1) {
       pool->return_index(req->server_id, req->backend_direct_fd);
-      req->backend_direct_fd = -1; // Prevent double-returns
+      req->backend_direct_fd = -1;
     }
-
-    // 2. Tell io_uring to kill the client socket (Fire and forget!)
     close_client_direct(req->direct_fd_index);
-
-    // Note: We don't need to manually close the pipes here because
-    // the ~RequestData() destructor will automatically close them for us!
   }
 };
 
@@ -152,7 +143,6 @@ IoUringEngine::IoUringEngine(int port, int queue_depth)
 
   int opt = 1;
   setsockopt(pimpl->server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-  // since multiple threads will listen on same 8080 hencse reuseport
   setsockopt(pimpl->server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 
   sockaddr_in address{};
@@ -175,8 +165,7 @@ IoUringEngine::IoUringEngine(int port, int queue_depth)
   int serverCount = 3;
   int connectionsPerServer = 50;
   pool = std::make_unique<BackendPool>();
-  pool->init(serverCount,
-             connectionsPerServer); // 1 server, 50 connections for testing
+  pool->init(serverCount, connectionsPerServer);
 
   for (size_t serverId = 0; serverId < serverCount; serverId++) {
     for (size_t x = 0; x < connectionsPerServer; x++) {
@@ -184,7 +173,8 @@ IoUringEngine::IoUringEngine(int port, int queue_depth)
       struct sockaddr_in backendAddr{};
       backendAddr.sin_port = htons(8081 + serverId);
       backendAddr.sin_family = AF_INET;
-      inet_pton(AF_INET, "10.0.0.2", &backendAddr.sin_addr);
+
+      inet_pton(AF_INET, "127.0.0.1", &backendAddr.sin_addr);
 
       connect(raw_fd, (struct sockaddr *)&backendAddr, sizeof(backendAddr));
 
@@ -204,6 +194,9 @@ IoUringEngine::~IoUringEngine() {
 
 void IoUringEngine::run() {
   pimpl->add_accept(pimpl->server_fd);
+
+  std::cout << "Zero-Copy Load Balancer Listening on port 8080!\n";
+
   while (true) {
     io_uring_submit(&pimpl->ring);
 
@@ -216,7 +209,7 @@ void IoUringEngine::run() {
 
     if (raw_req == nullptr) {
       io_uring_cqe_seen(&pimpl->ring, cqe);
-      continue; // It was just a close event finishing. Ignore it!
+      continue;
     }
 
     if (raw_req->type != EventType::ACCEPTING) {
@@ -228,7 +221,6 @@ void IoUringEngine::run() {
 
     switch (raw_req->type) {
     case EventType::ACCEPTING: {
-
       if (res < 0) {
         if (!(cqe->flags & IORING_CQE_F_MORE)) {
           pimpl->add_accept(pimpl->server_fd);
@@ -250,6 +242,7 @@ void IoUringEngine::run() {
       io_uring_submit(&pimpl->ring);
       break;
     }
+
     case EventType::READING_CLIENT_REQ: {
       if (res <= 0) {
         pimpl->terminate_connection(req.get(), pool.get());
@@ -257,96 +250,100 @@ void IoUringEngine::run() {
       }
 
       req->total_bytes_read += res;
-
       std::string_view window(req->buffer, req->total_bytes_read);
+      size_t boundary = window.find("\r\n\r\n");
 
-      size_t boundry = window.find("\r\n\r\n");
-
-      if (bound != std::string_view::npos) {
-        // found complete headers now forward the request to backendserver
-        req->server_id = 0;
+      if (boundary != std::string_view::npos) {
+        req->server_id = 0; // hardcoded for now
         req->backend_direct_fd = pool->checkout(req->server_id);
 
         if (req->backend_direct_fd == -1) {
           pimpl->terminate_connection(req.get(), pool.get());
-          break; // FIX: Drop client safely if pool is completely empty
+          break;
         }
 
-        req->type = EventType::WRITING_CLIENT_REQ_TO_BACKEND;
-        pimpl->forward_to_backend(req.get());
+        // Forward the exact parsed request to the backend
+        pimpl->add_write(req->backend_direct_fd, req->buffer,
+                         req->total_bytes_read,
+                         EventType::WRITING_CLIENT_REQ_TO_BACKEND, req.get());
 
         req.release();
         io_uring_submit(&pimpl->ring);
       } else {
-        // header not finished read next chunk
-        auto *sqe = io_uring_get_sqe(&ring);
-        io_uring_prep_recv(sqe, req->direct_fd_index,
-                           req->buffer + req->total_bytes_read, // Pointer math!
-                           MAX_BUFFER_SIZE - req->total_bytes_read, 0);
-        io_uring_sqe_set_data(sqe, req.release());
+        // Read next chunk
+        pimpl->add_read_offset(
+            req->direct_fd_index, req->buffer + req->total_bytes_read,
+            MAX_BUFFER_SIZE - req->total_bytes_read, req.get());
+        req.release();
+        io_uring_submit(&pimpl->ring);
       }
-
       break;
     }
+
     case EventType::WRITING_CLIENT_REQ_TO_BACKEND: {
       if (res < 0) {
         pimpl->terminate_connection(req.get(), pool.get());
         break;
       }
-
+      // Reset bytes_read for the upcoming backend response
+      req->total_bytes_read = 0;
       req->type = EventType::READING_BACKEND_RESP;
       pimpl->add_read(req->backend_direct_fd, req.get());
       io_uring_submit(&pimpl->ring);
       req.release();
       break;
     }
+
     case EventType::READING_BACKEND_RESP: {
       if (res <= 0) {
         pimpl->terminate_connection(req.get(), pool.get());
         break;
       }
-      if (!req->backend_headers_parsed) {
-        // do something
+
+      if (!req->backend_header_parsed) {
         req->total_bytes_read += res;
         std::string_view window(req->buffer, req->total_bytes_read);
-        size_t boundry = window.find("\r\n\r\n");
-        if (boundry != std::string_view::npos) {
-          req->backend_headers_parsed = true;
+        size_t boundary = window.find("\r\n\r\n");
+
+        if (boundary != std::string_view::npos) {
+          req->backend_header_parsed = true;
           size_t cl_pos = window.find("Content-Length: ");
+
           if (cl_pos != std::string_view::npos) {
             cl_pos += 16;
             size_t end_pos = window.find("\r", cl_pos);
             if (end_pos != std::string_view::npos) {
               std::string_view num_str =
                   window.substr(cl_pos, end_pos - cl_pos);
-
               std::from_chars(num_str.data(), num_str.data() + num_str.size(),
                               req->expected_content_length);
             }
           }
 
           size_t header_size = boundary + 4;
-          req->body_bytes_read = req->total_bytes_read - header_size;
+          req->body_bytes_forwarded = req->total_bytes_read - header_size;
 
-          req->type = EventType::WRITING_BACKEND_HEADERS_TO_CLIENT;
-          pimpl->add_write(req->direct_fd_index, req->buffer,
-                           req->total_bytes_read, req->type, req.get());
+          pimpl->add_write(
+              req->direct_fd_index, req->buffer, req->total_bytes_read,
+              EventType::WRITING_BACKEND_HEADERS_TO_CLIENT, req.get());
         } else {
-          // boundry not found read headers again
-          pimpl->add_read_offset(req->backend_direct_fd,
-                                 req->buffer + req->total_bytes_read,
-                                 8192 - req->total_bytes_read, req.get());
+          pimpl->add_read_offset(
+              req->backend_direct_fd, req->buffer + req->total_bytes_read,
+              MAX_BUFFER_SIZE - req->total_bytes_read, req.get());
         }
       } else {
+        // Fallback if headers were parsed, but we are doing a normal copy
         req->body_bytes_forwarded += res;
-        req->type = EventType::WRITING_BACKEND_HEADERS_TO_CLIENT;
-        pimpl->add_write(req->direct_fd_index, req->buffer, res, req->type,
+        pimpl->add_write(req->direct_fd_index, req->buffer, res,
+                         EventType::WRITING_BACKEND_HEADERS_TO_CLIENT,
                          req.get());
       }
+
       io_uring_submit(&pimpl->ring);
       req.release();
       break;
     }
+
     case EventType::WRITING_BACKEND_HEADERS_TO_CLIENT: {
       if (res < 0) {
         pimpl->terminate_connection(req.get(), pool.get());
@@ -355,61 +352,81 @@ void IoUringEngine::run() {
 
       if (req->backend_header_parsed) {
         if (req->body_bytes_forwarded >= req->expected_content_length) {
-          // all the headers + body are sent towards  client nothing more to do
-          pool->returnConnection(req->server_id, req->backend_fd_index);
-          // resetting the paramenters of req
+          pool->return_index(req->server_id, req->backend_direct_fd);
+
           req->total_bytes_read = 0;
           req->body_bytes_forwarded = 0;
           req->backend_header_parsed = false;
           req->expected_content_length = 0;
 
           req->type = EventType::READING_CLIENT_REQ;
-          pimpl->add_read(req->client_direct_fd, req.get());
+          pimpl->add_read(req->direct_fd_index, req.get());
         } else {
-          // body not completely forwarded to client incomes the zero copy state
           req->type = EventType::SPLICING_REQ_TO_PIPE;
           size_t bytes_to_forward =
-              req->expected_content_length -
-              req->body_bytes_forwarded; // this much data is remaining
+              req->expected_content_length - req->body_bytes_forwarded;
 
-          // pipe_fd[1] write-only because data flows in to the pipe, pipe_fd[0]
-          // read-only data goes out of the pipe
-          add_splice(req->backend_direct_fd, req->pipe_fd[1], bytes_to_forward,
-                     req.get(), true, false);
+          pimpl->add_splice(req->backend_direct_fd, req->pipe_fds[1],
+                            bytes_to_forward, req.get(), true, false);
         }
       } else {
         req->type = EventType::READING_BACKEND_RESP;
-        pimpl->add_read(req->backend_direct_fd, req, get());
+        pimpl->add_read(req->backend_direct_fd, req.get());
       }
 
       io_uring_submit(&pimpl->ring);
       req.release();
       break;
     }
+
     case EventType::SPLICING_REQ_TO_PIPE: {
       if (res <= 0) {
         pimpl->terminate_connection(req.get(), pool.get());
         break;
       }
 
-      // data is in the pipe and now we have to take that out into client
-      // socket
       req->type = EventType::SPLICING_RESP_TO_CLIENT;
-      pimpl->add_splice(req->pipe_fds[0], req->client_fd_index, res, req.get(),
+      pimpl->add_splice(req->pipe_fds[0], req->direct_fd_index, res, req.get(),
                         false, true);
 
       io_uring_submit(&pimpl->ring);
       req.release();
       break;
     }
+
     case EventType::SPLICING_RESP_TO_CLIENT: {
       if (res <= 0) {
         pimpl->terminate_connection(req.get(), pool.get());
         break;
       }
 
-      // we have data in pipe lets forward to clietn
+      req->body_bytes_forwarded += res;
+
+      if (req->body_bytes_forwarded >= req->expected_content_length) {
+        pool->return_index(req->server_id, req->backend_direct_fd);
+
+        req->total_bytes_read = 0;
+        req->body_bytes_forwarded = 0;
+        req->backend_header_parsed = false;
+        req->expected_content_length = 0;
+
+        req->type = EventType::READING_CLIENT_REQ;
+        pimpl->add_read(req->direct_fd_index, req.get());
+      } else {
+        req->type = EventType::SPLICING_REQ_TO_PIPE;
+        size_t bytes_left =
+            req->expected_content_length - req->body_bytes_forwarded;
+        pimpl->add_splice(req->backend_direct_fd, req->pipe_fds[1], bytes_left,
+                          req.get(), true, false);
+      }
+
+      io_uring_submit(&pimpl->ring);
+      req.release();
+      break;
     }
+
+    case EventType::CLOSING_CLIENT_CONNECTION:
+      break;
     }
   }
 }
