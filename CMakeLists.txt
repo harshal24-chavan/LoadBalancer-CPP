@@ -21,6 +21,7 @@ add_executable(
     src/MetricsCalc.cpp
     src/ResponseDecorator.cpp
     src/RequestHandler.cpp
+    src/IoUringEngine.cpp
 )
 
 
