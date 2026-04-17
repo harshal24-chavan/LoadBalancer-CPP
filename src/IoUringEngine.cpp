@@ -23,7 +23,7 @@ enum class EventType {
   READING_CLIENT_REQ,
   WRITING_CLIENT_REQ_TO_BACKEND,
   READING_BACKEND_RESP,
-  WRITING_BACKEND_HEADERS_TO_PIPE,
+  WRITING_BACKEND_HEADERS_TO_CLIENT,
 
   // Zero-Copy states
   SPLICING_REQ_TO_PIPE,    // Backend -> Pipe
@@ -130,15 +130,15 @@ struct IoUringEngine::Impl {
 
   void terminate_connection(RequestData *req, BackendPool *pool) {
     if (req->backend_direct_fd != -1 && req->server_id != -1) {
-      pool->return_index(req->server_id, req->backend_direct_fd);
+      pool->returnConnection(req->server_id, req->backend_direct_fd);
       req->backend_direct_fd = -1;
     }
     close_client_direct(req->direct_fd_index);
   }
 };
 
-IoUringEngine::IoUringEngine(int port, int queue_depth,
-                             std::function<int()> routing_callback)
+IoUringEngine::IoUringEngine(std::function<int()> routing_callback, int port,
+                             int queue_depth)
     : pimpl(std::make_unique<Impl>()),
       get_next_server_callback(std::move(routing_callback)) {
   pimpl->server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -165,7 +165,7 @@ IoUringEngine::IoUringEngine(int port, int queue_depth,
   }
 
   int serverCount = 3;
-  int connectionsPerServer = 50;
+  int connectionsPerServer = 200;
   pool = std::make_unique<BackendPool>();
   pool->init(serverCount, connectionsPerServer);
 
@@ -183,7 +183,7 @@ IoUringEngine::IoUringEngine(int port, int queue_depth,
       int chosen_slot = 9000 + (serverId * 50) + x;
       io_uring_register_files_update(&pimpl->ring, chosen_slot, &raw_fd, 1);
       close(raw_fd);
-      pool->return_index(serverId, chosen_slot);
+      pool->returnConnection(serverId, chosen_slot);
     }
   }
 }
@@ -256,8 +256,9 @@ void IoUringEngine::run() {
       size_t boundary = window.find("\r\n\r\n");
 
       if (boundary != std::string_view::npos) {
-        req->server_id = get_next_server_callback(); // hardcoded for now
-        req->backend_direct_fd = pool->checkout(req->server_id);
+        // req->server_id = get_next_server_callback();
+        req->server_id = 0;
+        req->backend_direct_fd = pool->getServerConnection(req->server_id);
 
         if (req->backend_direct_fd == -1) {
           pimpl->terminate_connection(req.get(), pool.get());
@@ -327,7 +328,7 @@ void IoUringEngine::run() {
 
           pimpl->add_write(
               req->direct_fd_index, req->buffer, req->total_bytes_read,
-              EventType::WRITING_BACKEND_HEADERS_TO_PIPE, req.get());
+              EventType::WRITING_BACKEND_HEADERS_TO_CLIENT, req.get());
         } else {
           pimpl->add_read_offset(
               req->backend_direct_fd, req->buffer + req->total_bytes_read,
@@ -337,7 +338,8 @@ void IoUringEngine::run() {
         // Fallback if headers were parsed, but we are doing a normal copy
         req->body_bytes_forwarded += res;
         pimpl->add_write(req->direct_fd_index, req->buffer, res,
-                         EventType::WRITING_BACKEND_HEADERS_TO_PIPE, req.get());
+                         EventType::WRITING_BACKEND_HEADERS_TO_CLIENT,
+                         req.get());
       }
 
       io_uring_submit(&pimpl->ring);
@@ -345,7 +347,7 @@ void IoUringEngine::run() {
       break;
     }
 
-    case EventType::WRITING_BACKEND_HEADERS_TO_PIPE: {
+    case EventType::WRITING_BACKEND_HEADERS_TO_CLIENT: {
       if (res < 0) {
         pimpl->terminate_connection(req.get(), pool.get());
         break;
@@ -353,7 +355,7 @@ void IoUringEngine::run() {
 
       if (req->backend_header_parsed) {
         if (req->body_bytes_forwarded >= req->expected_content_length) {
-          pool->return_index(req->server_id, req->backend_direct_fd);
+          pool->returnConnection(req->server_id, req->backend_direct_fd);
 
           req->total_bytes_read = 0;
           req->body_bytes_forwarded = 0;
@@ -404,7 +406,7 @@ void IoUringEngine::run() {
       req->body_bytes_forwarded += res;
 
       if (req->body_bytes_forwarded >= req->expected_content_length) {
-        pool->return_index(req->server_id, req->backend_direct_fd);
+        pool->returnConnection(req->server_id, req->backend_direct_fd);
 
         req->total_bytes_read = 0;
         req->body_bytes_forwarded = 0;

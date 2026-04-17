@@ -1,14 +1,51 @@
-# Set the minimum required version of CMake
-cmake_minimum_required(VERSION 3.10)
+# 1. ALWAYS put cmake_minimum_required at the very top!
+cmake_minimum_required(VERSION 3.15)
 
 # Define the project name
-project(LoadBalancer)
+project(LoadBalancer CXX)
 
-# Set the C++ standard to C++17
+# Set the C++ standard to C++20
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Add the executable and list all your source (.cpp) files
+# Include the FetchContent module
+include(FetchContent)
+
+# ------------------------------------------------------------------
+# DEPENDENCIES (FetchContent)
+# ------------------------------------------------------------------
+
+# 1. tomlplusplus
+message(STATUS "Fetching tomlplusplus...")
+FetchContent_Declare(
+    tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG        v3.4.0
+)
+FetchContent_MakeAvailable(tomlplusplus)
+
+# 2. efsw (File Watcher for Hot-Reload)
+message(STATUS "Fetching efsw...")
+FetchContent_Declare(
+    efsw
+    GIT_REPOSITORY https://github.com/SpartanJ/efsw.git
+    GIT_TAG        master 
+)
+FetchContent_MakeAvailable(efsw)
+
+# 3. spdlog (High-performance logging)
+message(STATUS "Fetching spdlog...")
+FetchContent_Declare(
+    spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG        v1.12.0 
+)
+FetchContent_MakeAvailable(spdlog)
+
+# ------------------------------------------------------------------
+# CORE PROJECT BUILD
+# ------------------------------------------------------------------
+
 add_executable(
     load_balancer
     src/main.cpp
@@ -16,45 +53,26 @@ add_executable(
     src/RouteStrategy.cpp
     src/Server.cpp
     src/tomlParser.cpp
-    src/healthChecker.cpp
+    #src/healthChecker.cpp
     src/HotReloader.cpp
     src/MetricsCalc.cpp
-    src/ResponseDecorator.cpp
-    src/RequestHandler.cpp
+    #src/ResponseDecorator.cpp
     src/IoUringEngine.cpp
 )
 
-
-
+# Set include directories
 target_include_directories(load_balancer PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
-
-# Find the Crow library dependency (via vcpkg)
-find_package(Crow REQUIRED)
-
-# Find the standard threads library
+# Find standard threads library (Required by efsw, spdlog, and your health checker)
 find_package(Threads REQUIRED)
-
-# Find the toml++ library
-find_package(tomlplusplus REQUIRED)
-
-# Find the cpr library
-find_package(cpr REQUIRED)
-# find the efsw library for file watching
-find_package(efsw REQUIRED)
-
-find_package(spdlog REQUIRED)
-
-
 
 # Link the executable against the required libraries
 target_link_libraries(load_balancer PRIVATE
-    Crow::Crow
     tomlplusplus::tomlplusplus
-    Threads::Threads
-    cpr::cpr
-    efsw::efsw
     spdlog::spdlog
+    efsw
+    Threads::Threads
+    uring 
 )

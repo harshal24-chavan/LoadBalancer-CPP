@@ -33,7 +33,7 @@ public:
   void listServers();
   void setStrategy(std::unique_ptr<IRouteStrategy> strategy);
 
-  Server &getServer();
+  int getServer();
   std::vector<std::shared_ptr<Server>> getAllServers();
   int getHealthyCount() const;
 

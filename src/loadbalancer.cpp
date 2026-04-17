@@ -48,12 +48,14 @@ void LoadBalancer::setStrategy(std::unique_ptr<IRouteStrategy> strategy) {
   routeStrategy = std::move(strategy);
 }
 
-Server &LoadBalancer::getServer() {
-  // select servers from the active list
-  Server &selectedServer = routeStrategy->selectServer(activeServerList);
+int LoadBalancer::getServer() {
+  return 0;
 
+  // select servers from the active list
+  // Server &selectedServer = routeStrategy->selectServer(activeServerList);
+  //
   // make http request using crp:
-  return selectedServer;
+  // return selectedServer;
 }
 
 std::vector<std::shared_ptr<Server>> LoadBalancer::getAllServers() {

@@ -1,13 +1,13 @@
 #pragma once
 
-#include "ConnectionPool.hpp"
+#include "BackendPool.hpp"
 #include <functional>
 #include <memory>
 
 class IoUringEngine {
 public:
-  IoUringEngine(int port, int queue_depth = 1024,
-                std::function<int()> routing_callback);
+  IoUringEngine(std::function<int()> routing_callback, int port,
+                int queue_depth = 1024);
   ~IoUringEngine();
 
   // Delete copy constructors - engines are unique resources
@@ -17,7 +17,7 @@ public:
   void run();
 
 private:
-  std::unique_ptr<ConnectionPool> pool;
+  std::unique_ptr<BackendPool> pool;
   struct Impl; // Forward declaration of the implementation
   std::unique_ptr<Impl> pimpl;
   std::function<int()> get_next_server_callback;
