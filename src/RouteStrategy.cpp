@@ -10,8 +10,6 @@
 
 Server &RoundRobin::selectServer(
     const std::vector<std::shared_ptr<Server>> &serverList) {
-  // lock is automatically removed when function ends
-  std::lock_guard<std::mutex> lock(mtx);
 
   if (serverList.empty()) {
     throw std::runtime_error("No available servers to route the request.");

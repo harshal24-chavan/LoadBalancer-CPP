@@ -23,7 +23,7 @@ enum class EventType {
   READING_CLIENT_REQ,
   WRITING_CLIENT_REQ_TO_BACKEND,
   READING_BACKEND_RESP,
-  WRITING_BACKEND_HEADERS_TO_CLIENT,
+  WRITING_BACKEND_HEADERS_TO_PIPE,
 
   // Zero-Copy states
   SPLICING_REQ_TO_PIPE,    // Backend -> Pipe
@@ -137,8 +137,10 @@ struct IoUringEngine::Impl {
   }
 };
 
-IoUringEngine::IoUringEngine(int port, int queue_depth)
-    : pimpl(std::make_unique<Impl>()) {
+IoUringEngine::IoUringEngine(int port, int queue_depth,
+                             std::function<int()> routing_callback)
+    : pimpl(std::make_unique<Impl>()),
+      get_next_server_callback(std::move(routing_callback)) {
   pimpl->server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
   int opt = 1;
@@ -254,7 +256,7 @@ void IoUringEngine::run() {
       size_t boundary = window.find("\r\n\r\n");
 
       if (boundary != std::string_view::npos) {
-        req->server_id = 0; // hardcoded for now
+        req->server_id = get_next_server_callback(); // hardcoded for now
         req->backend_direct_fd = pool->checkout(req->server_id);
 
         if (req->backend_direct_fd == -1) {
@@ -325,7 +327,7 @@ void IoUringEngine::run() {
 
           pimpl->add_write(
               req->direct_fd_index, req->buffer, req->total_bytes_read,
-              EventType::WRITING_BACKEND_HEADERS_TO_CLIENT, req.get());
+              EventType::WRITING_BACKEND_HEADERS_TO_PIPE, req.get());
         } else {
           pimpl->add_read_offset(
               req->backend_direct_fd, req->buffer + req->total_bytes_read,
@@ -335,8 +337,7 @@ void IoUringEngine::run() {
         // Fallback if headers were parsed, but we are doing a normal copy
         req->body_bytes_forwarded += res;
         pimpl->add_write(req->direct_fd_index, req->buffer, res,
-                         EventType::WRITING_BACKEND_HEADERS_TO_CLIENT,
-                         req.get());
+                         EventType::WRITING_BACKEND_HEADERS_TO_PIPE, req.get());
       }
 
       io_uring_submit(&pimpl->ring);
@@ -344,7 +345,7 @@ void IoUringEngine::run() {
       break;
     }
 
-    case EventType::WRITING_BACKEND_HEADERS_TO_CLIENT: {
+    case EventType::WRITING_BACKEND_HEADERS_TO_PIPE: {
       if (res < 0) {
         pimpl->terminate_connection(req.get(), pool.get());
         break;
