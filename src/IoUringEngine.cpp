@@ -7,6 +7,7 @@
 #include <iostream>
 #include <memory>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -52,13 +53,6 @@ struct RequestData {
   size_t expected_content_length = 0;
 
   RequestData(EventType t, int fd) : type(t), direct_fd_index(fd) {}
-
-  ~RequestData() {
-    // if (pipe_fds[0] != -1)
-    //   close(pipe_fds[0]);
-    // if (pipe_fds[1] != -1)
-    //   close(pipe_fds[1]);
-  }
 };
 
 struct IoUringEngine::Impl {
@@ -127,10 +121,16 @@ struct IoUringEngine::Impl {
     io_uring_sqe_set_data(sqe, nullptr);
   }
 
-  void terminate_connection(RequestData *req, BackendPool *pool) {
+  void terminate_connection(RequestData *req, BackendPool *pool,
+                            PipePool *pipePool) {
     if (req->backend_direct_fd != -1 && req->server_id != -1) {
       pool->returnConnection(req->server_id, req->backend_direct_fd);
       req->backend_direct_fd = -1;
+    }
+    if (req->pipe_fds[0] != -1 || req->pipe_fds[1] != -1) {
+      pipePool->returnPipe(req->pipe_fds[0], req->pipe_fds[1]);
+      req->pipe_fds[0] = -1;
+      req->pipe_fds[1] = -1;
     }
     close_client_direct(req->direct_fd_index);
   }
@@ -158,13 +158,15 @@ IoUringEngine::IoUringEngine(std::function<int()> routing_callback, int port,
   pimpl->direct_descriptors.resize(
       MAX_CONNECTIONS + (MAX_PIPE_CONNECTIONS * 2),
       -1); //*2 because there are 2 pipes read and write
-  int ret = io_uring_register_files(
-      &pimpl->ring, pimpl->direct_descriptors.data(), MAX_CONNECTIONS);
+  int ret =
+      io_uring_register_files(&pimpl->ring, pimpl->direct_descriptors.data(),
+                              pimpl->direct_descriptors.size());
   if (ret < 0) {
     std::cerr << "Failed to register fixed files\n";
     exit(1);
   }
 
+  // making the backend pool connections
   int serverCount = 3;
   int connectionsPerServer = 200;
   pool = std::make_unique<BackendPool>();
@@ -181,17 +183,33 @@ IoUringEngine::IoUringEngine(std::function<int()> routing_callback, int port,
 
       connect(raw_fd, (struct sockaddr *)&backendAddr, sizeof(backendAddr));
 
-      int chosen_slot = 9000 + (serverId * 50) + x;
+      int chosen_slot = 9000 + (serverId * connectionsPerServer) + x;
       io_uring_register_files_update(&pimpl->ring, chosen_slot, &raw_fd, 1);
       close(raw_fd);
       pool->returnConnection(serverId, chosen_slot);
     }
   }
 
-  pipe_pool = std::make_unique<PipePool>(MAX_PIPE_CONNECTIONS);
-  for (size_t pipeId = 0; pipeId < MAX_PIPE_CONNECTIONS; pipeID++) {
-    // todo
+  // making and registering zero-copy kernel pipes with iouring
+  pipePool = std::make_unique<PipePool>();
+  pipePool->init(MAX_PIPE_CONNECTIONS);
+  for (size_t pipeId = 0; pipeId < MAX_PIPE_CONNECTIONS; pipeId++) {
+    int pipeFD[2] = {-1, -1};
+    if (pipe2(pipeFD, O_NONBLOCK | O_CLOEXEC) < 0) {
+      std::cerr << "CRITICAL: Failed to allocate kernel pipe!\n";
+      exit(1);
+    }
+
+    int chosen_slot = 10000 + (pipeId * 2);
+    io_uring_register_files_update(&pimpl->ring, chosen_slot, pipeFD, 2);
+
+    close(pipeFD[0]);
+    close(pipeFD[1]);
+
+    pipePool->returnPipe(chosen_slot, chosen_slot + 1);
   }
+  std::cout << "Successfully pooled " << MAX_PIPE_CONNECTIONS
+            << " zero-copy pipes.\n";
 }
 
 IoUringEngine::~IoUringEngine() {
@@ -253,7 +271,7 @@ void IoUringEngine::run() {
 
     case EventType::READING_CLIENT_REQ: {
       if (res <= 0) {
-        pimpl->terminate_connection(req.get(), pool.get());
+        pimpl->terminate_connection(req.get(), pool.get(), pipePool.get());
         break;
       }
 
@@ -262,12 +280,16 @@ void IoUringEngine::run() {
       size_t boundary = window.find("\r\n\r\n");
 
       if (boundary != std::string_view::npos) {
-        // req->server_id = get_next_server_callback();
-        req->server_id = 0;
+        req->server_id = get_next_server_callback();
         req->backend_direct_fd = pool->getServerConnection(req->server_id);
 
-        if (req->backend_direct_fd == -1) {
-          pimpl->terminate_connection(req.get(), pool.get());
+        PipePair p = pipePool->getPipe();
+        req->pipe_fds[0] = p.read_slot;
+        req->pipe_fds[1] = p.write_slot;
+
+        if (req->backend_direct_fd == -1 || req->pipe_fds[0] == -1 ||
+            req->pipe_fds[1] == -1) {
+          pimpl->terminate_connection(req.get(), pool.get(), pipePool.get());
           break;
         }
 
@@ -291,7 +313,7 @@ void IoUringEngine::run() {
 
     case EventType::WRITING_CLIENT_REQ_TO_BACKEND: {
       if (res < 0) {
-        pimpl->terminate_connection(req.get(), pool.get());
+        pimpl->terminate_connection(req.get(), pool.get(), pipePool.get());
         break;
       }
       // Reset bytes_read for the upcoming backend response
@@ -305,7 +327,7 @@ void IoUringEngine::run() {
 
     case EventType::READING_BACKEND_RESP: {
       if (res <= 0) {
-        pimpl->terminate_connection(req.get(), pool.get());
+        pimpl->terminate_connection(req.get(), pool.get(), pipePool.get());
         break;
       }
 
@@ -355,18 +377,21 @@ void IoUringEngine::run() {
 
     case EventType::WRITING_BACKEND_HEADERS_TO_CLIENT: {
       if (res < 0) {
-        pimpl->terminate_connection(req.get(), pool.get());
+        pimpl->terminate_connection(req.get(), pool.get(), pipePool.get());
         break;
       }
 
       if (req->backend_header_parsed) {
         if (req->body_bytes_forwarded >= req->expected_content_length) {
           pool->returnConnection(req->server_id, req->backend_direct_fd);
+          pipePool->returnPipe(req->pipe_fds[0], req->pipe_fds[1]);
 
           req->total_bytes_read = 0;
           req->body_bytes_forwarded = 0;
           req->backend_header_parsed = false;
           req->expected_content_length = 0;
+          req->pipe_fds[0] = -1;
+          req->pipe_fds[1] = -1;
 
           req->type = EventType::READING_CLIENT_REQ;
           pimpl->add_read(req->direct_fd_index, req.get());
@@ -376,7 +401,7 @@ void IoUringEngine::run() {
               req->expected_content_length - req->body_bytes_forwarded;
 
           pimpl->add_splice(req->backend_direct_fd, req->pipe_fds[1],
-                            bytes_to_forward, req.get(), true, false);
+                            bytes_to_forward, req.get(), true, true);
         }
       } else {
         req->type = EventType::READING_BACKEND_RESP;
@@ -390,13 +415,13 @@ void IoUringEngine::run() {
 
     case EventType::SPLICING_REQ_TO_PIPE: {
       if (res <= 0) {
-        pimpl->terminate_connection(req.get(), pool.get());
+        pimpl->terminate_connection(req.get(), pool.get(), pipePool.get());
         break;
       }
 
       req->type = EventType::SPLICING_RESP_TO_CLIENT;
       pimpl->add_splice(req->pipe_fds[0], req->direct_fd_index, res, req.get(),
-                        false, true);
+                        true, true);
 
       io_uring_submit(&pimpl->ring);
       req.release();
@@ -405,7 +430,7 @@ void IoUringEngine::run() {
 
     case EventType::SPLICING_RESP_TO_CLIENT: {
       if (res <= 0) {
-        pimpl->terminate_connection(req.get(), pool.get());
+        pimpl->terminate_connection(req.get(), pool.get(), pipePool.get());
         break;
       }
 
@@ -413,12 +438,15 @@ void IoUringEngine::run() {
 
       if (req->body_bytes_forwarded >= req->expected_content_length) {
         pool->returnConnection(req->server_id, req->backend_direct_fd);
+        pipePool->returnPipe(req->pipe_fds[0], req->pipe_fds[1]);
 
         // req->backend_direct_fd = -1;
         req->total_bytes_read = 0;
         req->body_bytes_forwarded = 0;
         req->backend_header_parsed = false;
         req->expected_content_length = 0;
+        req->pipe_fds[0] = -1;
+        req->pipe_fds[1] = -1;
 
         req->type = EventType::READING_CLIENT_REQ;
         pimpl->add_read(req->direct_fd_index, req.get());
@@ -427,7 +455,7 @@ void IoUringEngine::run() {
         size_t bytes_left =
             req->expected_content_length - req->body_bytes_forwarded;
         pimpl->add_splice(req->backend_direct_fd, req->pipe_fds[1], bytes_left,
-                          req.get(), true, false);
+                          req.get(), true, true);
       }
 
       io_uring_submit(&pimpl->ring);

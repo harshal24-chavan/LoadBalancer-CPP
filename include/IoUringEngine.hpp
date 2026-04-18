@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BackendPool.hpp"
+#include "PipePool.hpp"
 #include <functional>
 #include <memory>
 
@@ -18,6 +19,7 @@ public:
 
 private:
   std::unique_ptr<BackendPool> pool;
+  std::unique_ptr<PipePool> pipePool;
   struct Impl; // Forward declaration of the implementation
   std::unique_ptr<Impl> pimpl;
   std::function<int()> get_next_server_callback;
