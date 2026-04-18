@@ -1,5 +1,6 @@
 #include "IoUringEngine.hpp"
 #include "BackendPool.hpp"
+#include "PipePool.hpp"
 
 #include <charconv> // For std::from_chars
 #include <cstring>  // For memset/memcpy
@@ -17,6 +18,8 @@
 
 #define MAX_BUFFER_SIZE 8192
 #define MAX_CONNECTIONS 10000
+#define MAX_PIPE_CONNECTIONS                                                   \
+  1000 // i.e 2000 total pipes as read and write are 2 seperate pipes
 
 enum class EventType {
   ACCEPTING,
@@ -48,17 +51,13 @@ struct RequestData {
   bool backend_header_parsed = false;
   size_t expected_content_length = 0;
 
-  RequestData(EventType t, int fd) : type(t), direct_fd_index(fd) {
-    if (pipe2(pipe_fds, O_NONBLOCK | O_CLOEXEC) < 0) {
-      std::cerr << "CRITICAL: Failed to allocate kernel pipe!\n";
-    }
-  }
+  RequestData(EventType t, int fd) : type(t), direct_fd_index(fd) {}
 
   ~RequestData() {
-    if (pipe_fds[0] != -1)
-      close(pipe_fds[0]);
-    if (pipe_fds[1] != -1)
-      close(pipe_fds[1]);
+    // if (pipe_fds[0] != -1)
+    //   close(pipe_fds[0]);
+    // if (pipe_fds[1] != -1)
+    //   close(pipe_fds[1]);
   }
 };
 
@@ -156,7 +155,9 @@ IoUringEngine::IoUringEngine(std::function<int()> routing_callback, int port,
   listen(pimpl->server_fd, MAX_CONNECTIONS);
 
   io_uring_queue_init(queue_depth, &pimpl->ring, 0);
-  pimpl->direct_descriptors.resize(MAX_CONNECTIONS, -1);
+  pimpl->direct_descriptors.resize(
+      MAX_CONNECTIONS + (MAX_PIPE_CONNECTIONS * 2),
+      -1); //*2 because there are 2 pipes read and write
   int ret = io_uring_register_files(
       &pimpl->ring, pimpl->direct_descriptors.data(), MAX_CONNECTIONS);
   if (ret < 0) {
@@ -185,6 +186,11 @@ IoUringEngine::IoUringEngine(std::function<int()> routing_callback, int port,
       close(raw_fd);
       pool->returnConnection(serverId, chosen_slot);
     }
+  }
+
+  pipe_pool = std::make_unique<PipePool>(MAX_PIPE_CONNECTIONS);
+  for (size_t pipeId = 0; pipeId < MAX_PIPE_CONNECTIONS; pipeID++) {
+    // todo
   }
 }
 
@@ -408,6 +414,7 @@ void IoUringEngine::run() {
       if (req->body_bytes_forwarded >= req->expected_content_length) {
         pool->returnConnection(req->server_id, req->backend_direct_fd);
 
+        // req->backend_direct_fd = -1;
         req->total_bytes_read = 0;
         req->body_bytes_forwarded = 0;
         req->backend_header_parsed = false;

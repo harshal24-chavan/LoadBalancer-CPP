@@ -45,7 +45,7 @@ int main() {
 
   auto routing_function = []() -> int { return 0; };
 
-  IoUringEngine engine(routing_function, 8080, 8192);
+  IoUringEngine engine(routing_function, 8080, 16384);
 
   engine.run();
 
