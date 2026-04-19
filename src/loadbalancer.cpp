@@ -16,12 +16,10 @@ LoadBalancer &LoadBalancer::getInstance() {
   return lb;
 }
 void LoadBalancer::addServer(std::string url) {
-  std::lock_guard<std::mutex> lock(serverListMutex);
   serverList.push_back(std::make_shared<Server>(url));
 }
 
 void LoadBalancer::removeServer(std::string url) {
-  std::lock_guard<std::mutex> lock(serverListMutex);
   std::erase_if(serverList, [&](const std::shared_ptr<Server> &server) {
     return server->getUrl() == url;
   });
@@ -35,31 +33,15 @@ void LoadBalancer::listServers() {
   }
 
   std::cout << "------------------------------------------" << std::endl;
-  std::cout << "------------Active Servers------------" << std::endl;
-
-  for (const auto &server : activeServerList) {
-    std::cout << server->getUrl() << std::endl;
-  }
-
-  std::cout << "------------------------------------------" << std::endl;
 }
 
 void LoadBalancer::setStrategy(std::unique_ptr<IRouteStrategy> strategy) {
   routeStrategy = std::move(strategy);
 }
 
-int LoadBalancer::getServer() {
-  return 0;
-
-  // select servers from the active list
-  // Server &selectedServer = routeStrategy->selectServer(activeServerList);
-  //
-  // make http request using crp:
-  // return selectedServer;
-}
+int LoadBalancer::getServer() { return routeStrategy->selectServer(); }
 
 std::vector<std::shared_ptr<Server>> LoadBalancer::getAllServers() {
-  std::lock_guard<std::mutex> lock(serverListMutex);
   return serverList;
 }
 
@@ -84,7 +66,6 @@ void LoadBalancer::rebuildActiveServer() {
  * active server list
  */
 void LoadBalancer::accept(std::function<void(Server &)> visitorFunc) {
-  std::lock_guard<std::mutex> lock(serverListMutex);
   for (const auto &server : serverList) {
     visitorFunc(*server);
   }
@@ -97,7 +78,6 @@ void LoadBalancer::accept(std::function<void(Server &)> visitorFunc) {
  * accordingly
  */
 void LoadBalancer::updateConfig(AppConfig config) {
-  std::lock_guard<std::mutex> lock(loadBalancerConfigMutex);
 
   std::unordered_set<std::string> newServerList;
 
@@ -125,5 +105,5 @@ void LoadBalancer::updateConfig(AppConfig config) {
     }
   }
 
-  setStrategy(StrategyFactory::getStrategy(config.strategy));
+  setStrategy(StrategyFactory::getStrategy(config));
 }

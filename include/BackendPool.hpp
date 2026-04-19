@@ -31,6 +31,12 @@ struct BackendPool {
     return connectionId;
   }
 
+  int getServerCount() { return serverBackendPool.size(); }
+
+  int getServerConnectionCount(int serverId) {
+    return serverBackendPool[serverId].size();
+  }
+
   void returnConnection(int serverId, int connectionId) {
     serverBackendPool[serverId].push_back(connectionId);
   }

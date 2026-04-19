@@ -1,59 +1,46 @@
-// routestrategy.h
+#pragma once
 
-#pragma once // Important: Prevents the header from being included multiple
-             // times
-
+#include "BackendPool.hpp"
+#include "tomlParser.h"
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
-// Forward declare Server so we don't need to include its full definition here
 class Server;
 
 // The abstract interface (the "contract")
 class IRouteStrategy {
+
 public:
   virtual ~IRouteStrategy() = default;
-  virtual Server &
-  selectServer(const std::vector<std::shared_ptr<Server>> &serverList) = 0;
+  virtual int selectServer() = 0;
 };
 
-// The concrete strategy declaration
 class RoundRobin : public IRouteStrategy {
 private:
-  size_t serverCount = 0;
-  // Note: The mutex is an implementation detail, so it can be omitted here
-  // or you can include <mutex> and declare it.
-  mutable std::mutex mtx;
+  std::atomic<uint64_t> serverCount{0};
+  std::atomic<uint64_t> currentServer{0};
 
 public:
-  // The constructor declaration
-  RoundRobin() = default;
+  RoundRobin(int sc) : serverCount(sc) {}
 
-  // The method declaration
-  Server &
-  selectServer(const std::vector<std::shared_ptr<Server>> &serverList) override;
+  int selectServer() override;
 };
 
-// You can declare other strategies here as well
-// class LeastConnection : public IRouteStrategy { ... };
-//
-
-// The concrete strategy declaration
 class LeastConnection : public IRouteStrategy {
+private:
+  std::shared_ptr<BackendPool> pool;
+
 public:
-  // The constructor declaration
   LeastConnection() = default;
   mutable std::mutex mtx;
 
-  // The method declaration
-  Server &
-  selectServer(const std::vector<std::shared_ptr<Server>> &serverList) override;
+  int selectServer() override;
 };
 
 class StrategyFactory {
 public:
-  static std::unique_ptr<IRouteStrategy>
-  getStrategy(const std::string &strategy);
+  static std::unique_ptr<IRouteStrategy> getStrategy(AppConfig &config);
 };

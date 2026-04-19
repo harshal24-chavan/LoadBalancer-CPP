@@ -72,7 +72,7 @@ int main() {
   std::cout << "Load Balancer server starting on port " << config.port
             << std::endl;
 
-  auto routing_function = []() -> int { return 0; };
+  auto routing_function = [&lb]() -> int { return lb.getServer(); };
 
   IoUringEngine engine(routing_function, parsedServers, config.port,
                        config.queue_depth);
