@@ -11,11 +11,12 @@
  * Provides default values in case parsing fails or keys are missing.
  */
 struct AppConfig {
-  std::string host = "0.0.0.0"; // Default host
+  std::string host = "0.0.0.0";        // Default host
   std::string strategy = "RoundRobin"; // Default strategy
-  int port = 18080;             // Default port
+  int port = 8080;                     // Default port
   std::vector<std::string> serverList;
   int healthCheckInterval = 10;
+  int queue_depth = 1024;
 };
 
 /**
@@ -25,4 +26,4 @@ struct AppConfig {
  * @return An AppConfig struct populated with values from the file.
  * If parsing fails, it returns an AppConfig with default values.
  */
-AppConfig parseTomlFile(const std::string& filename);
+AppConfig parseTomlFile(const std::string &filename);

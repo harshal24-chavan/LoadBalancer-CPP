@@ -136,8 +136,10 @@ struct IoUringEngine::Impl {
   }
 };
 
-IoUringEngine::IoUringEngine(std::function<int()> routing_callback, int port,
-                             int queue_depth)
+IoUringEngine::IoUringEngine(
+    std::function<int()> routing_callback,
+    std::vector<std::pair<std::string, int>> &parsedServers, int port,
+    int queue_depth)
     : pimpl(std::make_unique<Impl>()),
       get_next_server_callback(std::move(routing_callback)) {
   pimpl->server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -167,19 +169,23 @@ IoUringEngine::IoUringEngine(std::function<int()> routing_callback, int port,
   }
 
   // making the backend pool connections
-  int serverCount = 3;
+  int serverCount = parsedServers.size();
   int connectionsPerServer = 200;
   pool = std::make_unique<BackendPool>();
   pool->init(serverCount, connectionsPerServer);
 
   for (size_t serverId = 0; serverId < serverCount; serverId++) {
+
+    const char *backend_host = parsedServers[serverId].first.c_str();
+    int backend_port = parsedServers[serverId].second;
+
     for (size_t x = 0; x < connectionsPerServer; x++) {
       int raw_fd = socket(AF_INET, SOCK_STREAM, 0);
       struct sockaddr_in backendAddr{};
-      backendAddr.sin_port = htons(8081 + serverId);
+      backendAddr.sin_port = htons(backend_port);
       backendAddr.sin_family = AF_INET;
 
-      inet_pton(AF_INET, "127.0.0.1", &backendAddr.sin_addr);
+      inet_pton(AF_INET, backend_host, &backendAddr.sin_addr);
 
       connect(raw_fd, (struct sockaddr *)&backendAddr, sizeof(backendAddr));
 
@@ -210,6 +216,8 @@ IoUringEngine::IoUringEngine(std::function<int()> routing_callback, int port,
   }
   std::cout << "Successfully pooled " << MAX_PIPE_CONNECTIONS
             << " zero-copy pipes.\n";
+
+  std::cout << "Running on port: " << port << std::endl;
 }
 
 IoUringEngine::~IoUringEngine() {
@@ -221,7 +229,7 @@ IoUringEngine::~IoUringEngine() {
 void IoUringEngine::run() {
   pimpl->add_accept(pimpl->server_fd);
 
-  std::cout << "Zero-Copy Load Balancer Listening on port 8080!\n";
+  std::cout << "Zero-Copy Load Balancer Listening\n";
 
   while (true) {
     io_uring_submit(&pimpl->ring);

@@ -7,8 +7,9 @@
 
 class IoUringEngine {
 public:
-  IoUringEngine(std::function<int()> routing_callback, int port,
-                int queue_depth = 1024);
+  IoUringEngine(std::function<int()> routing_callback,
+                std::vector<std::pair<std::string, int>> &parsedServers,
+                int port, int queue_depth = 1024);
   ~IoUringEngine();
 
   // Delete copy constructors - engines are unique resources
