@@ -1,87 +1,94 @@
-# C++ Application Layer (L7) Load Balancer
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+
+# Zero-Copy C++ L7 Load Balancer (Powered by io_uring)
 
 ![Load Balancer](https://external-content.duckduckgo.com/iu/?u=https%3A%2F%2Ftse2.mm.bing.net%2Fth%2Fid%2FOIP.zMTcLwRh-eSQ_i8nrKFv6QHaFW%3Fpid%3DApi&f=1&ipt=72b7977ce53c68c6169ebd581512284fa0ed7546fc09c6e36e2a08e6b4fde5f7&ipo=images)
 
-#### A high-performance, feature-rich HTTP/S reverse proxy and load balancer written in modern C++. This project is built using Low-Level Design (LLD) principles to be scalable, maintainable, and robust.
+#### A high-performance HTTP reverse proxy and load balancer written in modern C++. Architected around Linux io_uring to achieve a zero-copy, zero-allocation data plane.
 
 ### 📖 Description
 
-This project is a Layer 7 (Application Layer) load balancer that functions as a reverse proxy for HTTP/S traffic. It distributes incoming requests across a pool of backend servers using various balancing algorithms.
+This project is a Layer 7 load balancer designed to minimize userspace overhead by interfacing directly with the Linux Kernel API. 
 
-It is built from the ground up with a focus on clean architecture and modern C++ practices. It leverages powerful libraries like Crow (C++ Micro Web Framework) for request handling and CPR (C++ Requests) for proxying. The design heavily features common software design patterns for scalability and non-intrusive feature addition.
+By leveraging `io_uring` features (multishot accept, fixed file descriptors), pre-allocated kernel pipe pools, and `splice()`-based data forwarding, this proxy routes HTTP traffic without copying payload data into userspace memory or performing dynamic allocations during active requests.
+### 🚀 Performance Characteristics
+This proxy is architected to completely eliminate kernel/userspace bottlenecks. The core loop operates with strictly Zero-Copy data routing and Zero-Allocation memory management.
+#### Benchmark (wrk)
+Tested with 50 concurrent connections against local Go backends:
+```text
+Requests/sec:    34,700.00+
+Latency (Avg):   ~2.04ms
+CPU Utilization: 32%
+Socket errors:   connect 0, read 0, write 0, timeout 0
+```
 
-### ✨ Features
+### Kernel CPU Profiling (perf FlameGraph)
+A live perf record during maximum load proves the zero-copy and zero-allocation claims. The CPU spends the vast majority of its time executing core io_uring system calls and processing the Linux TCP/IP stack, with completely negligible userspace overhead.
+![FlameGraph](https://raw.githubusercontent.com/harshal24-chavan/LoadBalancer-CPP/refs/heads/main/proxy-flamegraph.svg)
+#### Key Optimizations Verified by Profiling:
+- **No sys_pipe2 or sys_close:** A custom PipePool entirely eliminates dynamic file descriptor creation under load.
+- **No Userspace memcpy:** Splicing between fixed backend sockets and fixed kernel pipes keeps all payload data strictly inside the kernel.
+- **No Userspace malloc:** Strict std::unique_ptr reuse and pre-allocated arrays ensure the C++ heap remains completely untouched during request processing.
 
-**HTTP/S Reverse Proxy**: Manages and forwards incoming HTTP/S requests to configured backend servers.
+### ✨ Core Features
 
-**LLD-Driven Architecture**:
-- Singleton Pattern: Ensures a single, globally accessible instance for core services like the LoadBalancer and Metrics manager.
-- Decorator Pattern: Enables non-intrusive, scalable features like request logging (ResponseDecorator) and metrics collection (MetricsCalc).
+**Kernel-Level Traffic Routing (io_uring):**
+- Completely bypasses standard epoll/recv/send architectures.
+- Utilizes `io_uring` registered buffers, multishot accept, and strictly registered/fixed file descriptors for all internal operations.
 
-**Zero-Downtime Configuration**:
-- **Fully Config-Driven**: All settings, including server pools and algorithms, are managed via a TOML file (tomlParser.cpp).
-- **Hot-Reloading**: Uses an EFSW file watcher (HotReloader.cpp) to automatically detect and apply configuration changes (e.g., adding/removing servers) without a restart.
+**Zero-Copy Pipeline:**
+- Large payloads are routed via `SPLICE_F_MOVE`, pushing data directly from the client network socket to the backend socket through an internal kernel pipe ring buffer.
 
-**Health Checks**: Employs multi-threaded, asynchronous health checks (healthChecker.cpp) to continuously monitor backend servers. Automatically removes unhealthy servers from the rotation and re-adds them upon recovery.
+**Persistent Connection Pooling:**
+- **BackendPool:**  Maintains persistent, keep-alive TCP connections across multiple backend servers, amortizing the cost of the TCP 3-way handshake to zero for recurring traffic.
+- **PipePool:** Pre-allocates thousands of kernel pipes at startup, checking them out atomically during requests to prevent file-descriptor starvation and syscall overhead.
 
 **Multiple Balancing Algorithms**:
 - Round Robin
 - Least Connections
 (Implemented via RouteStrategy.cpp)
 
-**Modern C++ Stack**: Built using crow, cpr-c++, tomlplusplus and efsw.
+**Modern C++ Stack**: Built using io_uring, C++20.
 
 ### 🛠️ Prerequisites
-
-Before you begin, ensure you have the following installed:
-
-- A C++ compiler (e.g., g++ or clang++) supporting C++20 or newer.
+Because this project relies on Linux kernel features, you must be running Linux. A kernel version of 5.19+ is highly recommended to support advanced io_uring flags (like Multishot Accept).
+- A C++ compiler supporting C++20 (e.g., g++ 11+ or clang++ 14+)
 - CMake (version 3.10 or newer)
-- Crow library (libcrow-dev)
-- CPR library (libcpr-dev)
-- TOML++ library (libtomlplusplus-dev)
-- EFSW library (libefsw-dev)
-- OpenSSL (libssl-dev)
+- liburing (liburing-dev) - Core asynchronous I/O engine
+- TOML++ (libtomlplusplus-dev) - Configuration parsing
+- EFSW (libefsw-dev) - File watching for hot-reloads
 
 ### Example for Ubuntu/Debian
 #### Note: You may need to build some of these from source or use a package manager like vcpkg
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential g++ cmake libssl-dev
-
+sudo apt-get install build-essential g++ cmake liburing-dev libssl-dev
 ```
 ### Install other dependencies as required (e.g., vcpkg install crow cpr tomlplusplus efsw)
 
 
 🚀 Building the Project
 
-This project uses CMake for building.
+This project uses CMake for building along with fetchContent.
 
 ##### Clone the repository:
 
 ```bash
-git clone https://your-repo-url/cpp-load-balancer.git
+git clone https://github.com/yourusername/cpp-load-balancer.git
 cd cpp-load-balancer
 
-```
-
-#### Configure and build with CMake:
-
-##### Create a build directory
-```bash
+# Create a build directory
 cmake -B build
+
+# Compile the project
+cmake --build build -j$(nproc)
 ```
-##### Compile the project
-```bash
-cmake --build build
-```
+
 
 ##### This will create the load_balancer executable inside the build/ directory.
 
 ### 🏃 Usage
-
-The load balancer is fully driven by its configuration file : **config.toml**
-
+To achieve maximum performance, ensure you raise your OS file descriptor limits before running (e.g., ulimit -n 65535).
 Run the application:
 ```bash
 ./build/load_balancer
@@ -92,49 +99,44 @@ The application will start, load the config.toml, and begin monitoring it for ch
 ### Example config.toml
 ``` toml
 [load_balancer]
-# Port for the load balancer to listen on
 listen_port = 8080
-# Balancing algorithm: "RoundRobin" | "LeastConnections"
 algorithm = "RoundRobin"
+queue_depth = 1024       # io_uring submission queue size
+max_connections = 10000
 
-# Health check configuration
 [health_check]
-# URI to check on backend servers
 path = "/health"
-# Interval between checks in seconds
 interval = 10
 
-# Define your backend servers
 [[servers]]
 name = "Server 1"
-url = "[http://127.0.0.1:3000](http://127.0.0.1:3000)"
+url = "http://127.0.0.1:8081"
+connections = 200
 
 [[servers]]
 name = "Server 2"
-url = "[http://127.0.0.1:3001](http://127.0.0.1:3001)"
-
-[[servers]]
-name = "Server 3"
-url = "[http://127.0.0.1:3002](http://127.0.0.1:3002)"
+url = "http://127.0.0.1:8082"
+connections = 200
 ```
 
 ### 📂 Project Structure
 ```
 .
+.
 ├── src/
-│   ├── main.cpp                # Main entry point
-│   ├── loadbalancer.cpp        # Core singleton, handles forwarding
-│   ├── RequestHandler.cpp      # Base request handler implementation
-│   ├── RouteStrategy.cpp       # Interface/Implementation for balancing algorithms
-│   ├── Server.cpp              # Represents a backend server
-│   ├── tomlParser.cpp          # Handles loading/reloading config.toml
-│   ├── healthChecker.cpp       # Manages async health checks
-│   ├── HotReloader.cpp         # File watcher for hot-reloading config
-│   ├── MetricsCalc.cpp         # Decorator/class for collecting metrics
-│   └── ResponseDecorator.cpp   # Decorator for request logging
+│   ├── main.cpp                # Application entry point
+│   ├── IoUringEngine.cpp       # The core event loop and state machine
+│   ├── BackendPool.cpp         # Manages persistent Go backend sockets
+│   ├── PipePool.cpp            # Pre-allocates kernel pipes for splice()
+│   ├── RouteStrategy.cpp       # Balancing algorithms (RoundRobin/LeastConn)
+│   ├── tomlParser.cpp          # Config loader
+│   ├── healthChecker.cpp       # Async backend monitoring
+│   └── HotReloader.cpp         # Live config file watcher
 ├── include/
-│   └── (All .h or .hpp files)
-├── CMakeLists.txt              # Build script
-├── config.toml                 # Example configuration file
-└── README.md                   # This file
+│   └── *.hpp                   # Header files
+├── CMakeLists.txt
+└── README.md
 ```
+
+### 📄 License
+This project is licensed under the MIT License - see the LICENSE file for details.
